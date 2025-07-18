@@ -1,0 +1,7 @@
+python-binance==1.0.19
+pandas==2.2.2
+matplotlib==3.8.4
+mplfinance==0.12.10b0
+PyQt5==5.15.10
+python-dotenv==1.0.1
+websocket-client==1.8.0
