@@ -6,9 +6,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
-    # 바이낸스 API 키
+    # 바이낸스 현물 API 키
     BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
     BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '')
+    
+    # 바이낸스 선물 API 키 (새로 추가)
+    BINANCE_FUTURES_API_KEY = os.getenv('BINANCE_FUTURES_API_KEY', '')
+    BINANCE_FUTURES_API_SECRET = os.getenv('BINANCE_FUTURES_API_SECRET', '')
 
     # 테스트넷 사용 여부
     USE_TESTNET = True
@@ -19,15 +23,15 @@ class Config:
     # 수수료율 (0.1%)
     COMMISSION_RATE = 0.001
 
-    # 지원하는 거래쌍
+    # 지원하는 거래쌍 (3개 메이저 코인)
     SUPPORTED_PAIRS = [
-        'BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'DOTUSDT', 'LINKUSDT',
-        'LTCUSDT', 'XRPUSDT', 'BCHUSDT', 'EOSUSDT', 'TRXUSDT'
+        'BTCUSDT',   # 비트코인
+        'ETHUSDT',   # 이더리움  
+        'SOLUSDT'    # 솔라나
     ]
 
     # 데이터 저장 경로
     DATA_DIR = 'data'
-    DATA_PATH = 'data'
 
     # 로그 설정
     LOG_LEVEL = 'INFO'
