@@ -1,9 +1,10 @@
 import visualization
 import backtesting
 import invest_strategy
+import dataset
 import sys
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QPushButton, QComboBox, QLineEdit, QTextEdit, QLabel, QProgressBar)
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QSpinBox,
+                             QPushButton, QComboBox, QLineEdit, QTextEdit, QLabel, QProgressBar, QMessageBox)
 from PyQt5.QtGui import QFont, QPixmap
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -12,9 +13,71 @@ import pyqtgraph as pg
 import pandas as pd
 
 STRATEGIES = {
-    "MA Crossover": invest_strategy.ma_crossover_strategy,
-    "RSI": invest_strategy.ma_crossover_strategy
+    "MA Crossover (Spot)": {
+        "function": invest_strategy.ma_crossover_strategy,
+        "type": "spot",  # 'spot': 일반(현물) 거래, 'leverage': 레버리지 거래
+        "params": {'short_ma': 20, 'long_ma': 50}
+    },
+    "MA Crossover (Leverage)": {
+        "function": invest_strategy.ma_crossover_leverage_strategy,
+        "type": "leverage",
+        "params": {'short_ma': 20, 'long_ma': 50}
+    },
+    "RSI (Spot)": {
+        "function": invest_strategy.rsi_strategy,
+        "type": "spot",
+        "params": {'rsi_period': 14, 'oversold_threshold': 30, 'overbought_threshold': 70}
+    },
+    "RSI (Leverage)": {
+        "function": invest_strategy.rsi_leverage_strategy,
+        "type": "leverage",
+        "params": {'rsi_period': 14, 'oversold_threshold': 30, 'overbought_threshold': 70}
+    },
+    "Bollinger Band (Spot)": {
+        "function": invest_strategy.bollinger_band_strategy,
+        "type": "spot",
+        "params": {'bb_length': 20, 'bb_std': 2}
+    },
+    "Bollinger Band (Leverage)": {
+        "function": invest_strategy.bollinger_band_leverage_strategy,
+        "type": "leverage",
+        "params": {'bb_length': 20, 'bb_std': 2}
+    },
+    "ADX Filtered Dual Strategy (Leverage)": {
+        "function": invest_strategy.adx_filtered_dual_strategy,
+        "type": "leverage",
+        "params": {
+            'adx_period': 10, 'adx_threshold': 25,
+            'rsi_period': 14, 'oversold_threshold': 30, 'overbought_threshold': 70,
+            'ema_short_period': 12, 'ema_long_period': 26,
+            'stop_loss_pct': -1.5, 'take_profit_pct': 3.0
+        }
+    }
 }
+
+class LeverageWorker(QThread):
+    progress = pyqtSignal(int, int)
+    finished = pyqtSignal(dict)
+    plot_update = pyqtSignal(object, float, float)
+
+    def __init__(self, strategy_function, strategy_param, leverage):
+        super().__init__()
+        self.strategy_function = strategy_function
+        self.strategy_param = strategy_param
+        self.leverage = leverage
+    
+    def run(self):
+        # backtesting.leverage_backtest 함수를 호출합니다.
+        results = backtesting.leverage_backtest(
+            self.strategy_function,
+            self.strategy_param,
+            self.leverage,
+            progress_callback=self.progress.emit,
+            plot_callback=self.plot_update.emit
+        )
+
+        if results:
+            self.finished.emit(results)
 
 class Worker(QThread):
     # 신호 정의
@@ -38,6 +101,18 @@ class Worker(QThread):
         if results:
             self.finished.emit(results)
 
+class DataUpdateWorker(QThread):
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def run(self):
+        try:
+            dataset.update_data(file_name='backtest/data.csv')
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -55,6 +130,7 @@ class MainWindow(QMainWindow):
 
         # 데이터 업데이트 버튼
         self.update_btn = QPushButton('데이터 업데이트')
+        self.update_btn.clicked.connect(self.handle_data_update)
         controls_layout.addWidget(self.update_btn)
 
         # 전략 선택
@@ -64,6 +140,12 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.strategy_combo)
 
         # 하이퍼 파라미터 입력
+        # 레버리지 스핀박스 (체크박스는 제거)
+        self.leverage_spinbox = QSpinBox()
+        self.leverage_spinbox.setRange(1, 125)
+        self.leverage_spinbox.setValue(10)
+        self.leverage_spinbox.setSuffix('x')
+        controls_layout.addWidget(self.leverage_spinbox)
 
         # 백테스팅 실행 버튼
         self.run_btn = QPushButton('백테스팅 실행')
@@ -98,7 +180,46 @@ class MainWindow(QMainWindow):
         self.main_layout.addWidget(self.results_text)
 
         self.run_btn.clicked.connect(self.run_backtest)
+        self.strategy_combo.currentTextChanged.connect(self.on_strategy_change)
+        self.on_strategy_change(self.strategy_combo.currentText())
 
+    def on_strategy_change(self, strategy_name):
+        """콤보박스에서 선택된 전략에 따라 레버리지 입력창의 활성화 여부를 결정합니다."""
+        if not strategy_name:
+            return
+            
+        strategy_type = STRATEGIES[strategy_name].get('type', 'spot')
+
+        if strategy_type == 'leverage':
+            self.leverage_spinbox.setEnabled(True)
+        else: # 'spot'
+            self.leverage_spinbox.setEnabled(False)
+
+    def handle_data_update(self):
+        self.update_btn.setEnabled(False)
+        self.run_btn.setEnabled(False)
+        self.results_text.setText("데이터 업데이트를 시작합니다...")
+
+        # 데이터 업데이트 워커 생성 및 시작
+        self.data_worker = DataUpdateWorker()
+        self.data_worker.finished.connect(self.on_data_update_finished)
+        self.data_worker.error.connect(self.on_data_update_error)
+        self.data_worker.start()
+    
+    def on_data_update_finished(self):
+        """데이터 업데이트 성공 시 호출될 메소드"""
+        self.results_text.append("데이터 업데이트가 완료되었습니다.")
+        QMessageBox.information(self, "알림", "데이터 업데이트가 성공적으로 완료되었습니다.")
+        self.update_btn.setEnabled(True)
+        self.run_btn.setEnabled(True)
+
+
+    def on_data_update_error(self, err_msg):
+        """데이터 업데이트 실패 시 호출될 메소드"""
+        self.results_text.append(f"데이터 업데이트 중 오류 발생: {err_msg}")
+        QMessageBox.critical(self, "오류", f"데이터 업데이트 중 오류가 발생했습니다:\n{err_msg}")
+        self.update_btn.setEnabled(True)
+        self.run_btn.setEnabled(True)
     
     def run_backtest(self):
         self.run_btn.setEnabled(False)
@@ -116,18 +237,23 @@ class MainWindow(QMainWindow):
         self.strategy_line.setData(self.x_data, self.y_strategy)
         self.market_line.setData(self.x_data, self.y_market)
 
-        selected_strategy_name = self.strategy_combo.currentText()
-        strategy_function = STRATEGIES[selected_strategy_name]
+        selected_name = self.strategy_combo.currentText()
+        strategy_info = STRATEGIES[selected_name]
+        
+        strategy_function = strategy_info["function"]
+        strategy_type = strategy_info["type"]
+        params = strategy_info["params"] # 기본 파라미터를 가져옴 (향후 UI에서 수정 가능)
 
-        # 하이퍼파라미터 입력 받게 추가해야 함
-        if selected_strategy_name == "MA Crossover":
-            params = {'short_ma': 20, 'long_ma': 50}
-        elif selected_strategy_name == "RSI":
-            params = {'rsi_period': 14, 'oversold_threshold': 30, 'overbought_threshold': 70}
-        else:
-            params = {}
+        if strategy_type == 'leverage':
+            leverage_value = self.leverage_spinbox.value()
+            self.results_text.append(f"\n레버리지 백테스팅 모드 (전략: {selected_name}, 레버리지: {leverage_value}x)")
+            self.worker = LeverageWorker(strategy_function, params, leverage_value)
+        
+        else: # 'spot'
+            self.results_text.append(f"\n일반 백테스팅 모드 (전략: {selected_name})")
+            self.worker = Worker(strategy_function, params)
 
-        self.worker = Worker(strategy_function, params)
+        # Worker 연결 및 시작 (공통 로직)
         self.worker.progress.connect(self.update_progress)
         self.worker.plot_update.connect(self.update_plot)
         self.worker.finished.connect(self.display_results)
