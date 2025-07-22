@@ -507,13 +507,10 @@ class ProfessionalPlotlyChart(QWidget):
                 # 연결 상태 업데이트
                 self.connection_status.setStyleSheet("color: #00ff88; font-size: 14px;")
                 
-                # 상태 정보 업데이트
-                current_price = df['close'].iloc[-1]
-                data_source = "Historical + Live" if len(df) > 10 else "Live Only"
-                self.status_label.setText(
-                    f"{data_source}: {self.current_symbol} - ${current_price:.4f} - "
-                    f"{len(df)} candles - Last update: {datetime.now().strftime('%H:%M:%S')}"
-                )
+                # 상태 정보 표시 제거 (UI 깔끔하게)
+                # current_price = df['close'].iloc[-1]
+                # self.status_label.setText(f"{self.current_symbol}: ${current_price:.4f}")
+                pass
                 
         except Exception as e:
             print(f"차트 업데이트 오류: {e}")
@@ -773,20 +770,22 @@ class ProfessionalPlotlyChart(QWidget):
             
         ax.set_xlim(-0.5, len(df) - 0.5)
         
-        # 제목과 정보 표시 (HTS 스타일)
-        change_color = '#02c076' if change >= 0 else '#f84960'
-        title_info = f"{self.current_symbol} • ${current_price:.4f}"
-        change_info = f"{change:+.4f} ({change_pct:+.2f}%)"
+        # 제목과 정보 표시 제거 (깔끔한 차트)
+        # change_color = '#02c076' if change >= 0 else '#f84960'
+        # title_info = f"{self.current_symbol} • ${current_price:.4f}"
+        # change_info = f"{change:+.4f} ({change_pct:+.2f}%)"
         
-        # 실제 데이터 범위 vs 표시 범위 정보
-        range_info = f"Display Range: ${used_range:.2f} | Data Range: ${actual_range:.2f} • {self.current_interval}"
+        # 실제 데이터 범위 vs 표시 범위 정보 제거
+        # range_info = f"Display Range: ${used_range:.2f} | Data Range: ${actual_range:.2f} • {self.current_interval}"
         
-        ax.text(0.01, 0.98, title_info, transform=ax.transAxes, 
-               fontsize=16, fontweight='bold', color='white', va='top')
-        ax.text(0.01, 0.93, change_info, transform=ax.transAxes, 
-               fontsize=12, color=change_color, va='top', fontweight='bold')
-        ax.text(0.01, 0.88, range_info, transform=ax.transAxes, 
-               fontsize=9, color='#8a8a8a', va='top')
+        # 텍스트 표시 제거
+        # ax.text(0.01, 0.98, title_info, transform=ax.transAxes, 
+        #        fontsize=16, fontweight='bold', color='white', va='top')
+        # ax.text(0.01, 0.93, change_info, transform=ax.transAxes, 
+        #        fontsize=12, color=change_color, va='top', fontweight='bold')
+        # 범위 정보 텍스트도 제거
+        # ax.text(0.01, 0.88, range_info, transform=ax.transAxes, 
+        #        fontsize=9, color='#8a8a8a', va='top')
         
         # 범례
         if any([self.indicators['ma7'], self.indicators['ma25'], self.indicators['ma99']]):

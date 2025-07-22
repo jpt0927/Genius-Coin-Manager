@@ -8,15 +8,40 @@ class BinanceFuturesClient:
     """바이낸스 선물거래 (레버리지) 클라이언트"""
     
     def __init__(self):
-        self.client = Client(
-            Config.BINANCE_FUTURES_API_KEY,
-            Config.BINANCE_FUTURES_API_SECRET,
-            testnet=Config.USE_TESTNET
-        )
-        self.logger = logging.getLogger(__name__)
+        try:
+            self.client = Client(
+                Config.BINANCE_FUTURES_API_KEY,
+                Config.BINANCE_FUTURES_API_SECRET,
+                testnet=Config.USE_TESTNET
+            )
+            
+            # 📡 연결 안정성 향상 설정
+            self.client.session.timeout = 30  # 30초 타임아웃
+            
+            # 요청 간격 설정 (초당 최대 10회)
+            self.last_request_time = 0
+            self.min_request_interval = 0.1  # 100ms
+            
+            self.logger = logging.getLogger(__name__)
+            
+            # 기본 설정 초기화
+            self._initialize_futures_settings()
+            
+        except Exception as e:
+            self.logger.error(f"바이낸스 클라이언트 초기화 실패: {e}")
+            raise
+            
+    def _wait_for_rate_limit(self):
+        """API 요청 간격 제어"""
+        import time
+        current_time = time.time()
+        time_since_last_request = current_time - self.last_request_time
         
-        # 기본 설정 초기화
-        self._initialize_futures_settings()
+        if time_since_last_request < self.min_request_interval:
+            sleep_time = self.min_request_interval - time_since_last_request
+            time.sleep(sleep_time)
+        
+        self.last_request_time = time.time()
         
     def _initialize_futures_settings(self):
         """선물거래 초기 설정"""
@@ -39,6 +64,7 @@ class BinanceFuturesClient:
     def get_futures_balance(self):
         """선물 계정 잔고 조회"""
         try:
+            self._wait_for_rate_limit()
             balance = self.client.futures_account_balance()
             usdt_balance = next((item for item in balance if item["asset"] == "USDT"), None)
             if usdt_balance:
@@ -69,6 +95,7 @@ class BinanceFuturesClient:
     def get_position_info(self, symbol=None):
         """포지션 정보 조회"""
         try:
+            self._wait_for_rate_limit()
             positions = self.client.futures_position_information(symbol=symbol)
             if symbol:
                 # 특정 심볼의 포지션 정보
@@ -99,37 +126,73 @@ class BinanceFuturesClient:
             return None
             
     def create_futures_order(self, symbol, side, quantity, order_type='MARKET', price=None, leverage=None):
-        """선물 주문 실행"""
-        try:
-            # 레버리지 설정 (필요한 경우)
-            if leverage:
-                self.set_leverage(symbol, leverage)
-            
-            # 수량을 심볼에 맞는 정밀도로 조정
-            formatted_quantity = self.format_quantity(symbol, quantity)
-            self.logger.info(f"수량 조정: {quantity} → {formatted_quantity} ({symbol})")
+        """선물 주문 실행 (재시도 로직 포함)"""
+        max_retries = 3
+        retry_delay = 2  # 2초 대기
+        
+        for attempt in range(max_retries):
+            try:
+                # API 요청 간격 제어
+                self._wait_for_rate_limit()
                 
-            order_params = {
-                'symbol': symbol,
-                'side': side,
-                'type': order_type,
-                'quantity': formatted_quantity,  # 조정된 수량 사용
-            }
-            
-            # 지정가 주문인 경우 가격 추가
-            if order_type == 'LIMIT':
-                order_params['price'] = price
-                order_params['timeInForce'] = 'GTC'  # Good Till Cancelled
+                # 레버리지 설정 (필요한 경우)
+                if leverage:
+                    self.set_leverage(symbol, leverage)
                 
-            result = self.client.futures_create_order(**order_params)
-            
-            self.logger.info(f"선물 주문 성공: {symbol} {side} {formatted_quantity}")
-            return True, result
-            
-        except BinanceAPIException as e:
-            error_msg = f"선물 주문 실패: {e}"
-            self.logger.error(error_msg)
-            return False, error_msg
+                # 수량을 심볼에 맞는 정밀도로 조정
+                formatted_quantity = self.format_quantity(symbol, quantity)
+                self.logger.info(f"[시도 {attempt + 1}] 수량 조정: {quantity} → {formatted_quantity} ({symbol})")
+                    
+                order_params = {
+                    'symbol': symbol,
+                    'side': side,
+                    'type': order_type,
+                    'quantity': formatted_quantity,
+                }
+                
+                # 지정가 주문인 경우 가격 추가
+                if order_type == 'LIMIT':
+                    order_params['price'] = price
+                    order_params['timeInForce'] = 'GTC'
+                
+                # 타임아웃 설정 (30초)
+                self.client.session.timeout = 30
+                    
+                result = self.client.futures_create_order(**order_params)
+                
+                self.logger.info(f"선물 주문 성공: {symbol} {side} {formatted_quantity} (시도 {attempt + 1})")
+                return True, result
+                
+            except BinanceAPIException as e:
+                error_code = e.code
+                error_msg = str(e)
+                
+                self.logger.warning(f"[시도 {attempt + 1}] 선물 주문 실패: {error_msg}")
+                
+                # 특정 오류는 재시도하지 않음
+                if error_code in [-1013, -2010, -2019]:  # 필터 실패, 잔고 부족 등
+                    return False, f"주문 거부: {error_msg}"
+                
+                # 타임아웃이나 서버 오류는 재시도
+                if error_code in [-1007, -1000, -1001] and attempt < max_retries - 1:
+                    self.logger.info(f"서버 오류로 {retry_delay}초 후 재시도...")
+                    import time
+                    time.sleep(retry_delay)
+                    retry_delay *= 1.5  # 지수적 백오프
+                    continue
+                else:
+                    return False, f"API 오류: {error_msg}"
+                    
+            except Exception as e:
+                self.logger.error(f"[시도 {attempt + 1}] 예상치 못한 오류: {e}")
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    return False, f"연결 오류: {e}"
+        
+        return False, "최대 재시도 횟수 초과"
             
     def close_position(self, symbol):
         """포지션 전량 청산"""
