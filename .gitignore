@@ -1,3 +1,26 @@
 venv/
-backtest/data.csv
-backtest/__pycache__
+backtest/BTCUSDT_1m_from_2018_to_present.csv
+.venv/
+
+# 환경 변수 파일 (민감한 정보 포함)
+investSimulate/.env
+.env
+
+# 로그 파일
+trading_log.txt
+./trading_log.txt
+
+# Python 관련
+.python-version
+./.python-version
+__pycache__/
+*.pyc
+*.pyo
+
+# 데이터 파일
+data/
+investSimulate/data/portfolio.json
+investSimulate/data/transactions.json
+
+# IDE 관련
+.idea/
