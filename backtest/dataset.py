@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import time
 import os
 
-def update_data(file_name='data.csv', symbol='BTCUSDT'):
+def update_data(file_name='backtest/data.csv', symbol='BTCUSDT'):
     """
     지정된 심볼의 데이터를 업데이트합니다. (이어쓰기 방식으로 최적화)
     - 파일이 없으면: 2018년부터 모든 1분봉 데이터를 수집합니다.
