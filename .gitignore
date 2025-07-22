@@ -24,3 +24,6 @@ investSimulate/data/transactions.json
 
 # IDE 관련
 .idea/
+
+backtest/data.csv
+backtest/__pycache__
