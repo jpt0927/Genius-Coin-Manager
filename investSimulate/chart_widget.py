@@ -21,7 +21,12 @@ import platform
 
 # 한글 폰트 설정
 def setup_korean_font():
-    """한글 폰트 설정"""
+    """한글 폰트 설정 - 안전한 방식"""
+    import matplotlib
+    matplotlib.use('Qt5Agg')  # GUI 백엔드 설정을 먼저
+    
+    import matplotlib.pyplot as plt
+    
     system = platform.system()
     
     if system == 'Darwin':  # macOS
@@ -43,16 +48,20 @@ def setup_korean_font():
         try:
             plt.rcParams['font.family'] = font_name
             plt.rcParams['axes.unicode_minus'] = False
-            # 테스트해보기
-            fig, ax = plt.subplots()
-            ax.text(0.5, 0.5, '한글테스트')
-            plt.close(fig)
-            print(f"한글 폰트 설정 완료: {font_name}")
+            # 간단한 테스트 (Figure 생성하지 않고)
+            print(f"한글 폰트 설정 시도: {font_name}")
             return True
-        except:
+        except Exception as e:
+            print(f"폰트 {font_name} 설정 실패: {e}")
             continue
     
-    print("한글 폰트를 찾을 수 없습니다. 영문으로 표시됩니다.")
+    print("한글 폰트를 찾을 수 없습니다. 기본 폰트를 사용합니다.")
+    # 기본 설정
+    try:
+        plt.rcParams['font.family'] = 'DejaVu Sans'
+        plt.rcParams['axes.unicode_minus'] = False
+    except:
+        pass
     return False
 
 # 폰트 설정 실행
@@ -289,9 +298,18 @@ class ProfessionalPlotlyChart(QWidget):
         from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
         from matplotlib.figure import Figure
         
-        self.figure = Figure(figsize=(16, 7), facecolor='#0d1421')  # 적정 크기로 조정
+        # Figure 초기화 시 DPI 명시적 설정 🔧
+        self.figure = Figure(figsize=(16, 7), dpi=100, facecolor='#0d1421')  # DPI 추가
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setMinimumHeight(450)  # 적정 높이
+        
+        # Figure의 DPI 확인 및 강제 설정
+        if self.figure.dpi is None:
+            self.figure.set_dpi(100)
+        
+        # matplotlib의 스레드 안전성을 위한 설정
+        import matplotlib
+        matplotlib.use('Qt5Agg')  # GUI 백엔드 명시적 설정
         
         # 마우스 이벤트 연결 (줌 기능)
         self.canvas.mpl_connect('scroll_event', self.on_scroll)
@@ -358,8 +376,7 @@ class ProfessionalPlotlyChart(QWidget):
         row1_layout.addWidget(QLabel("Symbol:"))
         self.symbol_combo = QComboBox()
         self.symbol_combo.addItems([
-            "BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "SOLUSDT",
-            "XRPUSDT", "DOTUSDT", "AVAXUSDT", "MATICUSDT", "LINKUSDT"
+            "BTCUSDT", "ETHUSDT", "SOLUSDT"  # 3개 메이저 코인
         ])
         self.symbol_combo.setCurrentText(self.current_symbol)
         self.symbol_combo.currentTextChanged.connect(self.on_symbol_changed)
@@ -490,13 +507,10 @@ class ProfessionalPlotlyChart(QWidget):
                 # 연결 상태 업데이트
                 self.connection_status.setStyleSheet("color: #00ff88; font-size: 14px;")
                 
-                # 상태 정보 업데이트
-                current_price = df['close'].iloc[-1]
-                data_source = "Historical + Live" if len(df) > 10 else "Live Only"
-                self.status_label.setText(
-                    f"{data_source}: {self.current_symbol} - ${current_price:.4f} - "
-                    f"{len(df)} candles - Last update: {datetime.now().strftime('%H:%M:%S')}"
-                )
+                # 상태 정보 표시 제거 (UI 깔끔하게)
+                # current_price = df['close'].iloc[-1]
+                # self.status_label.setText(f"{self.current_symbol}: ${current_price:.4f}")
+                pass
                 
         except Exception as e:
             print(f"차트 업데이트 오류: {e}")
@@ -558,11 +572,39 @@ class ProfessionalPlotlyChart(QWidget):
             df['RSI'] = 100 - (100 / (1 + rs))
             
     def draw_professional_candlesticks(self, ax, df):
-        """전문적인 캔들스틱 그리기"""
+        """전문적인 캔들스틱 그리기 - 크기 최적화 🚀"""
         from matplotlib.patches import Rectangle
         import matplotlib.patches as patches
         
         x_values = range(len(df))
+        
+        # 캔들 크기 최적화 🚀
+        candle_count = len(df)
+        
+        # 시간대별 기본 폭 설정
+        width_map = {
+            "1m": 0.5,
+            "5m": 0.6, 
+            "15m": 0.7,
+            "1h": 0.75,
+            "4h": 0.8,
+            "1d": 0.85
+        }
+        base_width = width_map.get(self.current_interval, 0.6)
+        
+        # 데이터 양에 따른 동적 조정
+        if candle_count > 100:
+            dynamic_factor = 0.4  # 많은 데이터일 때 더 좁게
+        elif candle_count > 50:
+            dynamic_factor = 0.6
+        else:
+            dynamic_factor = 0.8  # 적은 데이터일 때 더 넓게
+            
+        # 최종 캔들 폭 계산
+        optimal_width = base_width * dynamic_factor
+        optimal_width = max(0.2, min(0.9, optimal_width))  # 0.2~0.9 범위로 제한
+        
+        print(f"캔들 크기 최적화: {self.current_interval}, 수량: {candle_count}, 폭: {optimal_width:.2f}")
         
         for i, (idx, row) in enumerate(df.iterrows()):
             open_price = row['open']
@@ -577,9 +619,9 @@ class ProfessionalPlotlyChart(QWidget):
             
             # 상하 심지 먼저 그리기 (캔들 뒤에 보이도록)
             ax.plot([i, i], [low_price, high_price], 
-                   color=wick_color, linewidth=1.5, alpha=0.9, zorder=1)
+                   color=wick_color, linewidth=1.2, alpha=0.9, zorder=1)
             
-            # 캔들 몸통 그리기 (적당한 폭으로 조정)
+            # 캔들 몸통 그리기 (최적화된 폭 사용) 🚀
             body_height = abs(close_price - open_price)
             body_bottom = min(open_price, close_price)
             
@@ -587,11 +629,11 @@ class ProfessionalPlotlyChart(QWidget):
             if body_height < (high_price - low_price) * 0.01:
                 body_height = (high_price - low_price) * 0.01
                 
-            # 캔들 폭을 0.6으로 조정 (적당한 크기)
+            # 최적화된 캔들 폭 적용 🚀
             rect = Rectangle(
-                (i - 0.3, body_bottom), 0.6, body_height,
+                (i - optimal_width/2, body_bottom), optimal_width, body_height,
                 facecolor=body_color, edgecolor=body_color,
-                alpha=0.95, linewidth=0.8, zorder=2
+                alpha=0.95, linewidth=0.6, zorder=2
             )
             ax.add_patch(rect)
                    
@@ -618,13 +660,40 @@ class ProfessionalPlotlyChart(QWidget):
                            color='#adccff', alpha=0.1)
                            
     def draw_volume_chart(self, ax, df):
-        """거래량 차트 그리기"""
+        """거래량 차트 그리기 - 캔들과 동일한 폭으로 최적화 🚀"""
         x_values = range(len(df))
         colors = ['#02c076' if row['close'] >= row['open'] else '#f84960' 
                  for _, row in df.iterrows()]
         
-        # 거래량 바 폭을 0.6으로 조정하여 캔들과 맞춤
-        bars = ax.bar(x_values, df['volume'], color=colors, alpha=0.7, width=0.6, linewidth=0)
+        # 캔들과 동일한 폭 계산 🚀
+        candle_count = len(df)
+        
+        # 시간대별 기본 폭 설정
+        width_map = {
+            "1m": 0.5,
+            "5m": 0.6, 
+            "15m": 0.7,
+            "1h": 0.75,
+            "4h": 0.8,
+            "1d": 0.85
+        }
+        base_width = width_map.get(self.current_interval, 0.6)
+        
+        # 데이터 양에 따른 동적 조정
+        if candle_count > 100:
+            dynamic_factor = 0.4
+        elif candle_count > 50:
+            dynamic_factor = 0.6
+        else:
+            dynamic_factor = 0.8
+            
+        # 최종 거래량 바 폭 계산
+        optimal_width = base_width * dynamic_factor
+        optimal_width = max(0.2, min(0.9, optimal_width))
+        
+        # 거래량 바 그리기 (캔들과 동일한 폭) 🚀
+        bars = ax.bar(x_values, df['volume'], color=colors, alpha=0.7, 
+                     width=optimal_width, linewidth=0)
         
         # 거래량 이동평균
         if len(df) >= 20:
@@ -701,20 +770,22 @@ class ProfessionalPlotlyChart(QWidget):
             
         ax.set_xlim(-0.5, len(df) - 0.5)
         
-        # 제목과 정보 표시 (HTS 스타일)
-        change_color = '#02c076' if change >= 0 else '#f84960'
-        title_info = f"{self.current_symbol} • ${current_price:.4f}"
-        change_info = f"{change:+.4f} ({change_pct:+.2f}%)"
+        # 제목과 정보 표시 제거 (깔끔한 차트)
+        # change_color = '#02c076' if change >= 0 else '#f84960'
+        # title_info = f"{self.current_symbol} • ${current_price:.4f}"
+        # change_info = f"{change:+.4f} ({change_pct:+.2f}%)"
         
-        # 실제 데이터 범위 vs 표시 범위 정보
-        range_info = f"Display Range: ${used_range:.2f} | Data Range: ${actual_range:.2f} • {self.current_interval}"
+        # 실제 데이터 범위 vs 표시 범위 정보 제거
+        # range_info = f"Display Range: ${used_range:.2f} | Data Range: ${actual_range:.2f} • {self.current_interval}"
         
-        ax.text(0.01, 0.98, title_info, transform=ax.transAxes, 
-               fontsize=16, fontweight='bold', color='white', va='top')
-        ax.text(0.01, 0.93, change_info, transform=ax.transAxes, 
-               fontsize=12, color=change_color, va='top', fontweight='bold')
-        ax.text(0.01, 0.88, range_info, transform=ax.transAxes, 
-               fontsize=9, color='#8a8a8a', va='top')
+        # 텍스트 표시 제거
+        # ax.text(0.01, 0.98, title_info, transform=ax.transAxes, 
+        #        fontsize=16, fontweight='bold', color='white', va='top')
+        # ax.text(0.01, 0.93, change_info, transform=ax.transAxes, 
+        #        fontsize=12, color=change_color, va='top', fontweight='bold')
+        # 범위 정보 텍스트도 제거
+        # ax.text(0.01, 0.88, range_info, transform=ax.transAxes, 
+        #        fontsize=9, color='#8a8a8a', va='top')
         
         # 범례
         if any([self.indicators['ma7'], self.indicators['ma25'], self.indicators['ma99']]):
@@ -794,11 +865,20 @@ class ProfessionalPlotlyChart(QWidget):
         self.figure.patch.set_facecolor('#0d1421')
         
     def update_chart(self, df):
-        """전문적인 matplotlib 차트 업데이트"""
+        """전문적인 matplotlib 차트 업데이트 - 스레드 안전성 강화"""
         try:
             if df is None or len(df) < 2:
                 print(f"데이터 부족: df 길이 {len(df) if df is not None else 'None'}")
                 return
+            
+            # matplotlib 스레드 안전성 확인
+            if self.figure is None:
+                print("Figure가 None입니다. 차트 초기화가 필요합니다.")
+                return
+            
+            if self.figure.dpi is None:
+                print("Figure DPI가 None입니다. 강제 설정합니다.")
+                self.figure.set_dpi(100)
             
             # 데이터 필터링 - 이상치 제거
             df_filtered = self.filter_outliers(df)
@@ -813,8 +893,12 @@ class ProfessionalPlotlyChart(QWidget):
             # 이동평균 계산
             self.calculate_technical_indicators(df_filtered)
             
-            # Figure 클리어
-            self.figure.clear()
+            # Figure 클리어 (안전하게)
+            try:
+                self.figure.clear()
+            except Exception as e:
+                print(f"Figure 클리어 오류: {e}")
+                return
             
             # 현재 가격과 변화율 계산
             current_price = df_filtered['close'].iloc[-1]
@@ -825,73 +909,108 @@ class ProfessionalPlotlyChart(QWidget):
             # RSI 표시 여부에 따른 서브플롯 구성
             has_rsi = self.indicators.get('rsi', False) and len(df_filtered) >= 14
             
-            if has_rsi:
-                gs = self.figure.add_gridspec(4, 1, height_ratios=[3, 1, 1, 0.5], hspace=0.1)
-                ax_price = self.figure.add_subplot(gs[0])
-                ax_volume = self.figure.add_subplot(gs[1], sharex=ax_price)
-                ax_rsi = self.figure.add_subplot(gs[2], sharex=ax_price)
-            else:
-                gs = self.figure.add_gridspec(3, 1, height_ratios=[3, 1, 0.3], hspace=0.1)
-                ax_price = self.figure.add_subplot(gs[0])
-                ax_volume = self.figure.add_subplot(gs[1], sharex=ax_price)
+            try:
+                if has_rsi:
+                    gs = self.figure.add_gridspec(4, 1, height_ratios=[3, 1, 1, 0.5], hspace=0.1)
+                    ax_price = self.figure.add_subplot(gs[0])
+                    ax_volume = self.figure.add_subplot(gs[1], sharex=ax_price)
+                    ax_rsi = self.figure.add_subplot(gs[2], sharex=ax_price)
+                else:
+                    gs = self.figure.add_gridspec(3, 1, height_ratios=[3, 1, 0.3], hspace=0.1)
+                    ax_price = self.figure.add_subplot(gs[0])
+                    ax_volume = self.figure.add_subplot(gs[1], sharex=ax_price)
+            except Exception as e:
+                print(f"Subplot 생성 오류: {e}")
+                return
+                
+            # 차트 요소들 그리기 (각각 try-catch로 보호)
+            try:
+                # 1. 전문적인 캔들스틱 차트
+                self.draw_professional_candlesticks(ax_price, df_filtered)
+            except Exception as e:
+                print(f"캔들스틱 그리기 오류: {e}")
             
-            # 1. 전문적인 캔들스틱 차트
-            self.draw_professional_candlesticks(ax_price, df_filtered)
+            try:
+                # 2. 이동평균선들
+                self.draw_moving_averages(ax_price, df_filtered)
+            except Exception as e:
+                print(f"이동평균 그리기 오류: {e}")
             
-            # 2. 이동평균선들
-            self.draw_moving_averages(ax_price, df_filtered)
+            try:
+                # 3. 볼린저 밴드
+                if self.indicators.get('bollinger', False):
+                    self.draw_bollinger_bands(ax_price, df_filtered)
+            except Exception as e:
+                print(f"볼린저 밴드 그리기 오류: {e}")
             
-            # 3. 볼린저 밴드
-            if self.indicators.get('bollinger', False):
-                self.draw_bollinger_bands(ax_price, df_filtered)
+            try:
+                # 4. 거래량 차트
+                self.draw_volume_chart(ax_volume, df_filtered)
+            except Exception as e:
+                print(f"거래량 차트 그리기 오류: {e}")
             
-            # 4. 거래량 차트
-            self.draw_volume_chart(ax_volume, df_filtered)
+            try:
+                # 5. RSI (선택사항)
+                if has_rsi:
+                    self.draw_rsi_chart(ax_rsi, df_filtered)
+            except Exception as e:
+                print(f"RSI 차트 그리기 오류: {e}")
             
-            # 5. RSI (선택사항)
-            if has_rsi:
-                self.draw_rsi_chart(ax_rsi, df_filtered)
+            try:
+                # 6. 가격 차트 스타일링
+                self.style_price_chart(ax_price, df_filtered, current_price, change, change_pct)
+            except Exception as e:
+                print(f"가격 차트 스타일링 오류: {e}")
             
-            # 6. 가격 차트 스타일링
-            self.style_price_chart(ax_price, df_filtered, current_price, change, change_pct)
+            try:
+                # 7. 거래량 차트 스타일링
+                self.style_volume_chart(ax_volume, df_filtered)
+            except Exception as e:
+                print(f"거래량 차트 스타일링 오류: {e}")
             
-            # 7. 거래량 차트 스타일링
-            self.style_volume_chart(ax_volume, df_filtered)
+            try:
+                # 8. RSI 차트 스타일링 (있는 경우)
+                if has_rsi:
+                    self.style_rsi_chart(ax_rsi)
+            except Exception as e:
+                print(f"RSI 차트 스타일링 오류: {e}")
             
-            # 8. RSI 차트 스타일링 (있는 경우)
-            if has_rsi:
-                self.style_rsi_chart(ax_rsi)
+            try:
+                # 9. 전체 차트 설정
+                self.finalize_chart_layout(df_filtered)
+            except Exception as e:
+                print(f"차트 레이아웃 마무리 오류: {e}")
             
-            # 9. 전체 차트 설정
-            self.finalize_chart_layout(df_filtered)
-            
-            # Canvas 업데이트
-            self.canvas.draw()
-            
+            try:
+                # Canvas 업데이트 (메인 스레드에서 안전하게)
+                self.canvas.draw()
+            except Exception as e:
+                print(f"Canvas 그리기 오류: {e}")
+                
         except Exception as e:
-            print(f"matplotlib 차트 업데이트 오류: {e}")
+            print(f"matplotlib 차트 업데이트 전체 오류: {e}")
             import traceback
             traceback.print_exc()
             
     def filter_outliers(self, df):
-        """최근 데이터 기반 필터링 및 Y축 범위 최적화"""
+        """최근 데이터 기반 필터링 및 Y축 범위 최적화 - 캔들 수 최적화 🚀"""
         try:
-            # 시간 간격별 표시할 캔들 수 설정
+            # 시간 간격별 표시할 캔들 수 설정 (캔들 크기 고려)
             display_candles = {
-                "1m": 60,    # 1시간
-                "5m": 72,    # 6시간  
-                "15m": 64,   # 16시간
-                "1h": 48,    # 48시간 (2일)
-                "4h": 42,    # 168시간 (1주일)
-                "1d": 30     # 30일
+                "1m": 80,    # 1시간 20분 (더 많이 표시)
+                "5m": 90,    # 7.5시간 (더 많이 표시)
+                "15m": 80,   # 20시간 (더 많이 표시)
+                "1h": 60,    # 60시간 (2.5일)
+                "4h": 50,    # 200시간 (8일)
+                "1d": 40     # 40일
             }
             
-            max_candles = display_candles.get(self.current_interval, 50)
+            max_candles = display_candles.get(self.current_interval, 60)
             
             # 최근 데이터만 사용
             if len(df) > max_candles:
                 df_recent = df.tail(max_candles).copy()
-                print(f"최근 데이터 필터링: {len(df)} -> {max_candles}개 캔들 ({self.current_interval})")
+                print(f"캔들 수 최적화: {len(df)} -> {max_candles}개 ({self.current_interval})")
             else:
                 df_recent = df.copy()
                 
@@ -990,6 +1109,8 @@ class ProfessionalPlotlyChart(QWidget):
             self.manual_ylim = None
             if self.df is not None:
                 self.update_chart(self.df)
+                
+    def closeEvent(self, event):
         """위젯 종료 시 WebSocket 정리"""
         if self.ws_manager:
             self.ws_manager.stop()
@@ -1000,7 +1121,8 @@ CandlestickChart = ProfessionalPlotlyChart
 
 # 업데이트 스레드도 단순화
 class ChartUpdateThread(QThread):
-    """차트 자동 업데이트 스레드 - WebSocket에서 처리하므로 불필요"""
+
+    # //정리하기
     update_signal = pyqtSignal()
     
     def __init__(self, chart_widget):
