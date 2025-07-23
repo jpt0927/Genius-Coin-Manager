@@ -6,15 +6,15 @@ from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from datetime import datetime
 
-from trading_engine import TradingEngine
-from config import Config
-from chart_widget import CandlestickChart, ChartUpdateThread
-from cross_position_manager import CrossPositionManager
-from binance_futures_client import BinanceFuturesClient
-from binance_retry_wrapper import retry_wrapper
-from trading_bot.bot_engine import TradingBot
-from trading_bot.bot_config import BotConfig
-from order_book_widget import MatplotlibOrderBook  # 호가창 위젯 추가
+from .trading_engine import TradingEngine
+from .config import Config
+from .chart_widget import CandlestickChart, ChartUpdateThread
+from .cross_position_manager import CrossPositionManager
+from .binance_futures_client import BinanceFuturesClient
+from .binance_retry_wrapper import retry_wrapper
+from .trading_bot.bot_engine import TradingBot
+from .trading_bot.bot_config import BotConfig
+from .order_book_widget import MatplotlibOrderBook
 
 class PriceUpdateThread(QThread):
     """가격 업데이트를 위한 스레드"""

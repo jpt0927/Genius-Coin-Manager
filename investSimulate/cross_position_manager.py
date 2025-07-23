@@ -3,7 +3,7 @@ import json
 import os
 import logging
 from datetime import datetime
-from config import Config
+from .config import Config
 
 class CrossPositionManager:
     """Cross 레버리지 포지션 전용 관리자"""

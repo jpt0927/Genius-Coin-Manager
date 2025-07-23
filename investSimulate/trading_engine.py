@@ -1,14 +1,14 @@
 # trading_engine.py
 import logging
-from binance_client import BinanceClient
+from .binance_client import BinanceClient
 # 순환 import 해결을 위해 lazy import 사용
-from config import Config
+from .config import Config
 
 class TradingEngine:
     def __init__(self):
         self.client = BinanceClient()
         # Lazy import로 순환 import 해결
-        from portfolio_manager import PortfolioManager
+        from .portfolio_manager import PortfolioManager
         self.portfolio = PortfolioManager()
         self.logger = logging.getLogger(__name__)
 

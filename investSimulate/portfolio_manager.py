@@ -3,7 +3,7 @@ import json
 import os
 import logging
 from datetime import datetime
-from config import Config
+from .config import Config
 
 class PortfolioManager:
     def __init__(self):

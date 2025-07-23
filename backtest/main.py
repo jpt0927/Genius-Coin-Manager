@@ -1,7 +1,7 @@
 import sys
-import backtesting
-import invest_strategy
-import dataset
+from . import backtesting
+from . import invest_strategy
+from . import dataset
 import pandas as pd
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QComboBox, QTextEdit, QLabel, QProgressBar, QLineEdit,

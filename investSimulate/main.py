@@ -3,8 +3,8 @@ import sys
 import os
 import logging
 from datetime import datetime
-from trading_engine import TradingEngine
-from config import Config
+from .trading_engine import TradingEngine
+from .config import Config
 
 def setup_logging():
     """로깅 설정"""
@@ -236,7 +236,7 @@ def run_gui():
         except Exception as e:
             print(f"Qt 경로 설정 중 오류 (무시 가능): {e}")
 
-        from gui_app import main as gui_main
+        from .gui_app import main as gui_main
         print("\n🖥️  GUI 모드를 실행합니다...")
         gui_main()
     except ImportError as e:

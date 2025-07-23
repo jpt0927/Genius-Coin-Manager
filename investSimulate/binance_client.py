@@ -2,7 +2,7 @@
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import logging
-from config import Config
+from .config import Config
 
 class BinanceClient:
     def __init__(self):

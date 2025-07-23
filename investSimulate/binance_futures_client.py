@@ -2,7 +2,7 @@
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import logging
-from config import Config
+from .config import Config
 
 class BinanceFuturesClient:
     """바이낸스 선물거래 (레버리지) 클라이언트"""
