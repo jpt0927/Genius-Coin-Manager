@@ -5,7 +5,7 @@ import dataset
 import pandas as pd
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QComboBox, QTextEdit, QLabel, QProgressBar, QLineEdit,
-                             QSpinBox, QDateEdit, QMessageBox)
+                             QSpinBox, QDateEdit, QMessageBox, QCheckBox)
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QDate
 import pyqtgraph as pg
@@ -236,6 +236,13 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(QLabel("롤링 기간:")); self.window_size_combo = QComboBox(); self.window_size_combo.addItems(WINDOW_SIZE_MAP.keys()); self.window_size_combo.setCurrentText("6개월"); settings_layout.addWidget(self.window_size_combo)
         settings_layout.addWidget(QLabel("롤링 간격:")); self.step_size_combo = QComboBox(); self.step_size_combo.addItems(STEP_SIZE_MAP.keys()); self.step_size_combo.setCurrentText("1일"); settings_layout.addWidget(self.step_size_combo)
         settings_layout.addWidget(QLabel("전체 기간 시작일:")); self.start_date_edit = QDateEdit(QDate.currentDate().addYears(-3)); self.start_date_edit.setCalendarPopup(True); settings_layout.addWidget(self.start_date_edit)
+
+        # ⭐ 1. 로그 스케일 체크박스 UI 추가
+        self.log_scale_checkbox = QCheckBox("Y축 로그 스케일")
+        settings_layout.addWidget(self.log_scale_checkbox)
+        
+        self.main_layout.addLayout(settings_layout)
+
         self.main_layout.addLayout(settings_layout)
 
         self.params_layout = QHBoxLayout(); self.main_layout.addLayout(self.params_layout)
@@ -250,6 +257,18 @@ class MainWindow(QMainWindow):
         self.run_btn.clicked.connect(self.run_backtest); self.update_btn.clicked.connect(self.handle_data_update)
         self.strategy_combo.currentTextChanged.connect(self.on_strategy_change); self.test_type_combo.currentTextChanged.connect(self.on_test_type_change)
         self.on_strategy_change(self.strategy_combo.currentText()); self.on_test_type_change(self.test_type_combo.currentText())
+
+        # ⭐ 2. 체크박스 신호 연결 추가
+        self.log_scale_checkbox.stateChanged.connect(self.toggle_log_scale)
+
+        self.on_strategy_change(self.strategy_combo.currentText())
+        self.on_test_type_change(self.test_type_combo.currentText())
+
+        # ⭐ 3. 로그 스케일 적용 함수 추가
+    def toggle_log_scale(self, state):
+        """Y축의 로그 스케일 모드를 켜고 끕니다."""
+        is_log_mode = (state == Qt.Checked)
+        self.plot_widget.getPlotItem().setLogMode(y=is_log_mode)
 
     def on_test_type_change(self, test_type):
         is_rolling = (test_type == "롤링 윈도우 테스트")
