@@ -1,0 +1,3 @@
+([('GeniusCoinManager',
+   '/Users/inter4259/Desktop/Programming/Genius-Coin-Manager/investSimulate/dist/GeniusCoinManager',
+   'EXECUTABLE')],)
