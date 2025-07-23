@@ -49,13 +49,10 @@ def setup_korean_font():
             plt.rcParams['font.family'] = font_name
             plt.rcParams['axes.unicode_minus'] = False
             # 간단한 테스트 (Figure 생성하지 않고)
-            print(f"한글 폰트 설정 시도: {font_name}")
             return True
         except Exception as e:
-            print(f"폰트 {font_name} 설정 실패: {e}")
             continue
     
-    print("한글 폰트를 찾을 수 없습니다. 기본 폰트를 사용합니다.")
     # 기본 설정
     try:
         plt.rcParams['font.family'] = 'DejaVu Sans'
@@ -93,7 +90,6 @@ class BinanceWebSocketManager:
     def load_historical_data(self):
         """REST API로 과거 데이터 로드"""
         try:
-            print(f"=== 과거 데이터 로드 시작: {self.symbol.upper()} {self.interval} ===")
             
             # 시간대별 데이터 수량 설정
             limit_map = {
@@ -115,7 +111,6 @@ class BinanceWebSocketManager:
             )
             
             if klines:
-                print(f"과거 데이터 {len(klines)}개 로드 완료")
                 
                 # 과거 데이터를 버퍼에 추가
                 for kline in klines:
@@ -131,17 +126,15 @@ class BinanceWebSocketManager:
                     self.klines_buffer.append(kline_data)
                 
                 self.historical_loaded = True
-                print(f"=== 과거 데이터 버퍼 적재 완료: {len(self.klines_buffer)}개 ===")
                 
                 # 초기 차트 표시
                 if self.callback:
                     self.callback(None, self.get_dataframe())
                     
             else:
-                print("과거 데이터 로드 실패")
+                self.load_error = True
                 
         except Exception as e:
-            print(f"과거 데이터 로드 오류: {e}")
             import traceback
             traceback.print_exc()
         
@@ -152,7 +145,6 @@ class BinanceWebSocketManager:
             # 메인넷 WebSocket URL 사용 (테스트넷에서도 데이터 수신 가능)
             url = f"wss://stream.binance.com:9443/ws/{stream_name}"
             
-            print(f"WebSocket 연결 중: {url}")
             
             self.ws = websocket.WebSocketApp(
                 url,
@@ -168,11 +160,10 @@ class BinanceWebSocketManager:
             self.ws_thread.start()
             
         except Exception as e:
-            print(f"WebSocket 연결 오류: {e}")
+            pass
             
     def on_open(self, ws):
         """연결 성공"""
-        print(f"테스트넷 WebSocket 연결 성공: {self.symbol}@kline_{self.interval}")
         self.reconnect_count = 0
         
     def on_message(self, ws, message):
@@ -203,11 +194,10 @@ class BinanceWebSocketManager:
                     if self.callback:
                         self.callback(kline_data, self.get_dataframe())
                 else:
-                    print("과거 데이터 로드 대기 중...")
+                    pass
                     
         except Exception as e:
-            print(f"실시간 메시지 처리 오류: {e}")
-            
+            pass
     def update_buffer(self, kline_data):
         """데이터 버퍼 업데이트 - 하이브리드 방식"""
         timestamp = kline_data['timestamp']
@@ -224,14 +214,11 @@ class BinanceWebSocketManager:
         if timestamp == last_timestamp:
             # 같은 시간대 - 현재 캔들 업데이트
             self.klines_buffer[-1] = kline_data
-            print(f"현재 캔들 업데이트: {timestamp}")
         elif timestamp > last_timestamp:
             # 새로운 시간대 - 새 캔들 추가
             self.klines_buffer.append(kline_data)
-            print(f"새 캔들 추가: {timestamp}")
         else:
             # 과거 시간대 - 무시 (이미 과거 데이터가 있음)
-            print(f"과거 캔들 무시: {timestamp}")
             return
             
     def get_dataframe(self):
@@ -245,14 +232,11 @@ class BinanceWebSocketManager:
         
     def on_error(self, ws, error):
         """에러 처리"""
-        print(f"WebSocket 에러: {error}")
         
     def on_close(self, ws, close_status_code, close_msg):
         """연결 종료"""
-        print(f"WebSocket 연결 종료: {close_status_code} - {close_msg}")
         
         if self.running and self.reconnect_count < self.max_reconnects:
-            print(f"재연결 시도 ({self.reconnect_count + 1}/{self.max_reconnects})")
             time.sleep(2 ** self.reconnect_count)  # 지수 백오프
             self.reconnect_count += 1
             self.connect()
@@ -447,6 +431,10 @@ class ProfessionalPlotlyChart(QWidget):
         
         return panel
         
+    def set_symbol(self, symbol):
+        """심볼 설정 (외부에서 호출용)"""
+        self.on_symbol_changed(symbol)
+            
     def on_symbol_changed(self, symbol):
         """심볼 변경"""
         if symbol != self.current_symbol:
@@ -497,9 +485,9 @@ class ProfessionalPlotlyChart(QWidget):
                 
                 # 데이터 상태 로그 (과도한 로그 방지)
                 if kline_data is None:
-                    print(f"=== 초기 과거 데이터 로드 완료: {len(df)}개 캔들 ===")
+                    pass
                 elif kline_data.get('is_closed', False):
-                    print(f"=== 새 캔들 완료: {kline_data['timestamp']} ===")
+                    pass
                 
                 # 차트 업데이트
                 self.update_chart(df)
@@ -513,7 +501,6 @@ class ProfessionalPlotlyChart(QWidget):
                 pass
                 
         except Exception as e:
-            print(f"차트 업데이트 오류: {e}")
             import traceback
             traceback.print_exc()
             
@@ -604,7 +591,6 @@ class ProfessionalPlotlyChart(QWidget):
         optimal_width = base_width * dynamic_factor
         optimal_width = max(0.2, min(0.9, optimal_width))  # 0.2~0.9 범위로 제한
         
-        print(f"캔들 크기 최적화: {self.current_interval}, 수량: {candle_count}, 폭: {optimal_width:.2f}")
         
         for i, (idx, row) in enumerate(df.iterrows()):
             open_price = row['open']
@@ -868,27 +854,21 @@ class ProfessionalPlotlyChart(QWidget):
         """전문적인 matplotlib 차트 업데이트 - 스레드 안전성 강화"""
         try:
             if df is None or len(df) < 2:
-                print(f"데이터 부족: df 길이 {len(df) if df is not None else 'None'}")
                 return
             
             # matplotlib 스레드 안전성 확인
             if self.figure is None:
-                print("Figure가 None입니다. 차트 초기화가 필요합니다.")
                 return
             
             if self.figure.dpi is None:
-                print("Figure DPI가 None입니다. 강제 설정합니다.")
                 self.figure.set_dpi(100)
             
             # 데이터 필터링 - 이상치 제거
             df_filtered = self.filter_outliers(df)
             if df_filtered is None or len(df_filtered) < 2:
-                print("필터링 후 데이터 부족")
                 return
             
             # 데이터 디버깅 정보
-            print(f"차트 업데이트: {len(df_filtered)}개 캔들, 가격 범위: {df_filtered['low'].min():.2f} - {df_filtered['high'].max():.2f}")
-            print(f"최근 캔들: O:{df_filtered['open'].iloc[-1]:.2f}, H:{df_filtered['high'].iloc[-1]:.2f}, L:{df_filtered['low'].iloc[-1]:.2f}, C:{df_filtered['close'].iloc[-1]:.2f}")
                 
             # 이동평균 계산
             self.calculate_technical_indicators(df_filtered)

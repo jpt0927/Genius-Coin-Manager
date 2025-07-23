@@ -21,6 +21,8 @@ class BinanceOrderBookWebSocket:
     def __init__(self, symbol, callback):
         self.symbol = symbol.lower()
         self.callback = callback
+        import time
+        self.id = int(time.time() * 1000) % 10000  # 간단한 ID
         self.ws = None
         self.running = False
         self.reconnect_count = 0
@@ -33,17 +35,18 @@ class BinanceOrderBookWebSocket:
         
     def start(self):
         """WebSocket 연결 시작"""
+        print(f"[BinanceOrderBookWebSocket] WebSocket 시작: {self.symbol}")
         self.running = True
         self.connect()
         
     def connect(self):
         """WebSocket 연결"""
         try:
-            # 바이낸스 실시간 호가창 WebSocket (20레벨, 100ms 업데이트)
-            stream_name = f"{self.symbol}@depth20@100ms"
+            # 바이낸스 실시간 호가창 WebSocket (20레벨, 1000ms 업데이트로 성능 최적화)
+            stream_name = f"{self.symbol}@depth20@1000ms"
             url = f"wss://stream.binance.com:9443/ws/{stream_name}"
+            print(f"[BinanceOrderBookWebSocket] 연결 URL: {url}")
             
-            print(f"호가창 WebSocket 연결 중: {url}")
             
             self.ws = websocket.WebSocketApp(
                 url,
@@ -63,7 +66,6 @@ class BinanceOrderBookWebSocket:
             
     def on_open(self, ws):
         """연결 성공"""
-        print(f"호가창 WebSocket 연결 성공: {self.symbol}")
         self.reconnect_count = 0
         
     def on_message(self, ws, message):
@@ -72,6 +74,12 @@ class BinanceOrderBookWebSocket:
             data = json.loads(message)
             
             if 'bids' in data and 'asks' in data:
+                # 데이터 수신 확인 (30초마다 한 번만 로그)
+                import time
+                current_time = time.time()
+                if not hasattr(self, 'last_log_time') or current_time - self.last_log_time > 30:
+                    print(f"[OrderBook] {self.symbol} 호가 데이터 수신 중... (ID: {self.id})")
+                    self.last_log_time = current_time
                 # 호가 데이터 파싱
                 self.bids.clear()
                 self.asks.clear()
@@ -105,10 +113,8 @@ class BinanceOrderBookWebSocket:
         
     def on_close(self, ws, close_status_code, close_msg):
         """연결 종료"""
-        print(f"호가창 WebSocket 연결 종료: {close_status_code}")
         
         if self.running and self.reconnect_count < self.max_reconnects:
-            print(f"호가창 재연결 시도 ({self.reconnect_count + 1}/{self.max_reconnects})")
             time.sleep(2 ** self.reconnect_count)  # 지수 백오프
             self.reconnect_count += 1
             self.connect()
@@ -117,7 +123,14 @@ class BinanceOrderBookWebSocket:
         """WebSocket 연결 종료"""
         self.running = False
         if self.ws:
-            self.ws.close()
+            try:
+                self.ws.close()
+                self.ws = None
+            except Exception as e:
+                pass
+        
+        if hasattr(self, 'ws_thread') and self.ws_thread and self.ws_thread.is_alive():
+            self.ws_thread.join(timeout=0.5)
 
 class MatplotlibOrderBook(QWidget):
     """matplotlib 기반 바이낸스 스타일 호가창 - 최적화 버전"""
@@ -164,7 +177,7 @@ class MatplotlibOrderBook(QWidget):
         
         # 업데이트 최적화
         self.last_render_time = 0
-        self.render_interval = 0.2  # 200ms마다 한 번만 렌더링
+        self.render_interval = 0.5  # 500ms마다 한 번만 렌더링 (성능 최적화)
         
         # UI 설정
         self.setup_ui()
@@ -237,9 +250,13 @@ class MatplotlibOrderBook(QWidget):
         
     def start_websocket(self):
         """WebSocket 시작"""
+        
+        # 기존 WebSocket 완전히 정리
         if self.ws_manager:
             self.ws_manager.stop()
+            self.ws_manager = None
             
+        # 새 WebSocket 생성 및 시작
         self.ws_manager = BinanceOrderBookWebSocket(
             self.current_symbol,
             self.on_orderbook_data
@@ -249,6 +266,7 @@ class MatplotlibOrderBook(QWidget):
     def on_orderbook_data(self, bids, asks):
         """호가 데이터 수신 콜백 - 렌더링 최적화 적용 🚀"""
         try:
+            # 과도한 로그 제거
             self.bids = bids
             self.asks = asks
             
@@ -303,7 +321,7 @@ class MatplotlibOrderBook(QWidget):
             # 매도호가 텍스트 객체들
             for y_pos in y_positions_ask:
                 price_text = self.ax.text(1, y_pos, "", fontsize=9, color='#f84960', weight='bold', ha='left', va='center')
-                qty_text = self.ax.text(5, y_pos, "", fontsize=9, color='#f0f0f0', ha='center', va='center')
+                qty_text = self.ax.text(5.8, y_pos, "", fontsize=9, color='#f0f0f0', ha='center', va='center')
                 total_text = self.ax.text(8.5, y_pos, "", fontsize=8, color='#8a8a8a', ha='right', va='center')
                 
                 self.text_objects['ask_prices'].append(price_text)
@@ -323,7 +341,7 @@ class MatplotlibOrderBook(QWidget):
             # 매수호가 텍스트 객체들
             for y_pos in y_positions_bid:
                 price_text = self.ax.text(1, y_pos, "", fontsize=9, color='#02c076', weight='bold', ha='left', va='center')
-                qty_text = self.ax.text(5, y_pos, "", fontsize=9, color='#f0f0f0', ha='center', va='center')
+                qty_text = self.ax.text(5.8, y_pos, "", fontsize=9, color='#f0f0f0', ha='center', va='center')
                 total_text = self.ax.text(8.5, y_pos, "", fontsize=8, color='#8a8a8a', ha='right', va='center')
                 
                 self.text_objects['bid_prices'].append(price_text)
@@ -350,7 +368,6 @@ class MatplotlibOrderBook(QWidget):
                                                           ha='center', va='center')
             
             self.chart_initialized = True
-            print("차트 객체 초기화 완료 🚀")
             
         except Exception as e:
             print(f"차트 초기화 오류: {e}")
@@ -386,9 +403,14 @@ class MatplotlibOrderBook(QWidget):
                     total = price * quantity
                     
                     # 텍스트만 업데이트 (객체 재사용) 🚀
-                    self.text_objects['ask_prices'][i].set_text(f"{price:,.2f}")
-                    self.text_objects['ask_quantities'][i].set_text(f"{quantity:.6f}")
-                    self.text_objects['ask_totals'][i].set_text(f"${total:,.0f}")
+                    price_text = f"{price:,.2f}"
+                    qty_text = f"{quantity:.6f}"
+                    total_text = f"${total:,.0f}"
+                    
+                    
+                    self.text_objects['ask_prices'][i].set_text(price_text)
+                    self.text_objects['ask_quantities'][i].set_text(qty_text)
+                    self.text_objects['ask_totals'][i].set_text(total_text)
                     
                     # 바 차트 업데이트
                     bar_width = (quantity / max_ask_qty) * 4 if max_ask_qty > 0 else 0
@@ -422,9 +444,14 @@ class MatplotlibOrderBook(QWidget):
                     total = price * quantity
                     
                     # 텍스트만 업데이트 (객체 재사용) 🚀
-                    self.text_objects['bid_prices'][i].set_text(f"{price:,.2f}")
-                    self.text_objects['bid_quantities'][i].set_text(f"{quantity:.6f}")
-                    self.text_objects['bid_totals'][i].set_text(f"${total:,.0f}")
+                    price_text = f"{price:,.2f}"
+                    qty_text = f"{quantity:.6f}"
+                    total_text = f"${total:,.0f}"
+                    
+                    
+                    self.text_objects['bid_prices'][i].set_text(price_text)
+                    self.text_objects['bid_quantities'][i].set_text(qty_text)
+                    self.text_objects['bid_totals'][i].set_text(total_text)
                     
                     # 바 차트 업데이트
                     bar_width = (quantity / max_bid_qty) * 4 if max_bid_qty > 0 else 0
@@ -553,10 +580,55 @@ class MatplotlibOrderBook(QWidget):
             
     def set_symbol(self, symbol):
         """심볼 변경"""
+        print(f"[OrderBook] set_symbol 호출됨: {symbol} (현재: {self.current_symbol})")
+        
         if symbol != self.current_symbol:
+            print(f"[OrderBook] 심볼 변경 시작: {self.current_symbol} -> {symbol}")
+                
+            # 기존 WebSocket 정리
+            if self.ws_manager:
+                print(f"[OrderBook] 기존 WebSocket 정리 중...")
+                self.ws_manager.stop()
+                self.ws_manager = None
+            
+            # 새 심볼 설정
             self.current_symbol = symbol
             self.status_label.setText(f"심볼 변경: {symbol} 호가창 연결 중...")
+            
+            # 호가 데이터 초기화
+            self.bids = OrderedDict()
+            self.asks = OrderedDict()
+            
+            # 화면 초기화 및 텍스트 객체 초기화
+            if self.ax:
+                self.ax.clear()
+                
+                # chart_initialized를 False로 설정하고 모든 텍스트 객체 초기화
+                self.chart_initialized = False
+                self.text_objects = {
+                    'ask_prices': [],
+                    'ask_quantities': [],
+                    'ask_totals': [],
+                    'bid_prices': [],
+                    'bid_quantities': [],
+                    'bid_totals': [],
+                    'current_price': None,
+                    'spread_info': None,
+                    'headers': []
+                }
+                self.background_patches = {
+                    'ask_backgrounds': [],
+                    'bid_backgrounds': [],
+                    'ask_bars': [],
+                    'bid_bars': []
+                }
+                
+                self.canvas.draw()
+            
+            # 새 WebSocket 즉시 시작
+            print(f"[OrderBook] 새 WebSocket 시작: {symbol}")
             self.start_websocket()
+            print(f"[OrderBook] 심볼 변경 완료: {symbol}")
             
     def closeEvent(self, event):
         """위젯 종료 시 WebSocket 정리"""

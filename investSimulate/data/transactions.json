@@ -580,5 +580,176 @@
     "commission": 17.1302130369695,
     "net_amount": 17113.08282393253,
     "timestamp": "2025-07-22T21:52:00.499216"
+  },
+  {
+    "type": "BUY",
+    "symbol": "SOLUSDT",
+    "currency": "SOL",
+    "quantity": 0.49677099,
+    "price": 201.3,
+    "total_amount": 100.000000287,
+    "commission": 0.10000000028700001,
+    "timestamp": "2025-07-23T13:50:41.174921"
+  },
+  {
+    "type": "BUY",
+    "symbol": "SOLUSDT",
+    "currency": "SOL",
+    "quantity": 4958.83665576,
+    "price": 201.66,
+    "total_amount": 999999.0000005616,
+    "commission": 999.9990000005616,
+    "timestamp": "2025-07-23T14:00:39.258397"
+  },
+  {
+    "type": "BUY",
+    "symbol": "SOLUSDT",
+    "currency": "SOL",
+    "quantity": 0.00496796,
+    "price": 201.29,
+    "total_amount": 1.0000006684,
+    "commission": 0.0010000006684,
+    "timestamp": "2025-07-23T14:04:05.361495"
+  },
+  {
+    "type": "BUY",
+    "symbol": "SOLUSDT",
+    "currency": "SOL",
+    "quantity": 0.00496796,
+    "price": 201.29,
+    "total_amount": 1.0000006684,
+    "commission": 0.0010000006684,
+    "timestamp": "2025-07-23T14:04:06.714472"
+  },
+  {
+    "type": "BUY",
+    "symbol": "SOLUSDT",
+    "currency": "SOL",
+    "quantity": 0.00496796,
+    "price": 201.29,
+    "total_amount": 1.0000006684,
+    "commission": 0.0010000006684,
+    "timestamp": "2025-07-23T14:04:06.981093"
+  },
+  {
+    "type": "BUY",
+    "symbol": "SOLUSDT",
+    "currency": "SOL",
+    "quantity": 0.00496796,
+    "price": 201.29,
+    "total_amount": 1.0000006684,
+    "commission": 0.0010000006684,
+    "timestamp": "2025-07-23T14:04:07.245866"
+  },
+  {
+    "type": "BUY",
+    "symbol": "SOLUSDT",
+    "currency": "SOL",
+    "quantity": 0.00496796,
+    "price": 201.29,
+    "total_amount": 1.0000006684,
+    "commission": 0.0010000006684,
+    "timestamp": "2025-07-23T14:04:07.504241"
+  },
+  {
+    "type": "BUY",
+    "symbol": "BTCUSDT",
+    "currency": "BTC",
+    "quantity": 8.4e-07,
+    "price": 118799.87,
+    "total_amount": 0.09979189079999999,
+    "commission": 9.979189079999999e-05,
+    "timestamp": "2025-07-23T14:06:22.587649"
+  },
+  {
+    "type": "BUY",
+    "symbol": "BTCUSDT",
+    "currency": "BTC",
+    "quantity": 8e-08,
+    "price": 118800.0,
+    "total_amount": 0.009504,
+    "commission": 9.504e-06,
+    "timestamp": "2025-07-23T14:06:42.672781"
+  },
+  {
+    "type": "SELL",
+    "symbol": "BTCUSDT",
+    "currency": "BTC",
+    "quantity": 9.2e-07,
+    "price": 118800.0,
+    "total_amount": 0.109296,
+    "commission": 0.000109296,
+    "net_amount": 0.10918670400000001,
+    "timestamp": "2025-07-23T14:06:45.144385"
+  },
+  {
+    "type": "BUY",
+    "symbol": "BTCUSDT",
+    "currency": "BTC",
+    "quantity": 0.00084175,
+    "price": 118800.0,
+    "total_amount": 99.99990000000001,
+    "commission": 0.09999990000000002,
+    "timestamp": "2025-07-23T14:06:48.034393"
+  },
+  {
+    "type": "BUY",
+    "symbol": "BTCUSDT",
+    "currency": "BTC",
+    "quantity": 0.00084175,
+    "price": 118799.99,
+    "total_amount": 99.99989158250001,
+    "commission": 0.09999989158250001,
+    "timestamp": "2025-07-23T14:06:49.715515"
+  },
+  {
+    "type": "BUY",
+    "symbol": "BTCUSDT",
+    "currency": "BTC",
+    "quantity": 0.00084175,
+    "price": 118799.99,
+    "total_amount": 99.99989158250001,
+    "commission": 0.09999989158250001,
+    "timestamp": "2025-07-23T14:06:52.102667"
+  },
+  {
+    "type": "BUY",
+    "symbol": "BTCUSDT",
+    "currency": "BTC",
+    "quantity": 8.41e-06,
+    "price": 118863.53,
+    "total_amount": 0.9996422873,
+    "commission": 0.0009996422873,
+    "timestamp": "2025-07-23T14:13:17.617969"
+  },
+  {
+    "type": "BUY",
+    "symbol": "SOLUSDT",
+    "currency": "SOL",
+    "quantity": 4.966e-05,
+    "price": 201.35,
+    "total_amount": 0.009999041,
+    "commission": 9.999041e-06,
+    "timestamp": "2025-07-23T14:15:49.990675"
+  },
+  {
+    "type": "BUY",
+    "symbol": "BTCUSDT",
+    "currency": "BTC",
+    "quantity": 8.44e-06,
+    "price": 118473.4,
+    "total_amount": 0.999915496,
+    "commission": 0.000999915496,
+    "timestamp": "2025-07-23T15:18:57.430528"
+  },
+  {
+    "type": "BUY",
+    "symbol": "BTCUSDT",
+    "currency": "BTC",
+    "quantity": 0.00084407,
+    "price": 118473.4,
+    "total_amount": 99.999842738,
+    "commission": 0.099999842738,
+    "timestamp": "2025-07-23T15:19:05.649128"
   }
 ]

@@ -35,24 +35,146 @@ except ImportError:
     print("호가창 위젯을 찾을 수 없습니다. order_book_widget.py가 있는지 확인하세요.")
     ORDER_BOOK_AVAILABLE = False
 
+# 백그라운드 워커 import
+from background_worker import BackgroundWorker, OptimizedUpdateManager
+
 class PriceUpdateThread(QThread):
-    """가격 업데이트를 위한 스레드"""
+    """최적화된 실시간 웹소켓 가격 업데이트 스레드"""
     price_updated = pyqtSignal(dict)
 
     def __init__(self, trading_engine):
         super().__init__()
         self.trading_engine = trading_engine
         self.running = False
+        self.ws = None
+        self.current_prices = {}
+        
+        # 로거 초기화
+        self.logger = logging.getLogger(__name__)
+        
+        # 배치 처리를 위한 변수들
+        self.price_buffer = {}
+        self.last_emit_time = 0
+        self.emit_interval = 1.0  # 1초마다 배치 처리
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self._emit_batched_prices)
+        self.update_timer.start(int(self.emit_interval * 1000))
 
     def run(self):
+        """바이낸스 웹소켓으로 실시간 가격 스트림"""
+        import websocket
+        import json
+        import threading
+        
         self.running = True
-        while self.running:
-            if self.trading_engine.update_prices():
-                self.price_updated.emit(self.trading_engine.current_prices)
-            self.msleep(5000)  # 5초마다 업데이트
+        
+        # 메모리 최적화: 핵심 심볼만 선택 (최대 10개)
+        core_symbols = [symbol.lower() for symbol in Config.SUPPORTED_PAIRS[:10]]
+        streams = [f"{symbol}@ticker" for symbol in core_symbols]
+        stream_url = f"wss://stream.binance.com:9443/ws/{'/'.join(streams)}"
+        
+        self.logger.info(f"🌐 핵심 심볼 {len(core_symbols)}개 구독 (메모리 최적화)")
+        
+        print(f"🌐 실시간 가격 웹소켓 연결 중... ({len(core_symbols)}개 심볼)")
+        
+        def on_message(ws, message):
+            try:
+                # 메시지 크기 체크 (너무 큰 메시지 무시)
+                if len(message) > 10000:  # 10KB 이상 메시지 무시
+                    return
+                    
+                data = json.loads(message)
+                if 'stream' in data:
+                    # 멀티 스트림 형태
+                    stream_data = data['data']
+                    symbol = stream_data['s']  # 심볼
+                    price = float(stream_data['c'])  # 현재가
+                else:
+                    # 단일 스트림 형태
+                    symbol = data['s']
+                    price = float(data['c'])
+                
+                # 가격 변화량 체크 (너무 작은 변화는 무시)
+                if symbol in self.current_prices:
+                    try:
+                        price_change = abs(price - self.current_prices[symbol]) / self.current_prices[symbol]
+                        if price_change < 0.0001:  # 0.01% 미만 변화 무시
+                            return
+                    except (ZeroDivisionError, TypeError):
+                        pass  # 계산 오류 시 무시하고 계속
+                
+                # 가격을 버퍼에 저장 (즉시 emit하지 않음)
+                self.price_buffer[symbol] = price
+                self.current_prices[symbol] = price
+                
+            except Exception as e:
+                error_msg = f"웹소켓 메시지 처리 오류: {e}"
+                if hasattr(self, 'logger'):
+                    self.logger.error(error_msg)
+                else:
+                    print(error_msg)
 
+        def on_error(ws, error):
+            if hasattr(self, 'logger'):
+                self.logger.error(f"웹소켓 에러: {error}")
+            else:
+                print(f"웹소켓 에러: {error}")
+            # 연결 제한 - 너무 많은 에러 시 중지
+            if not hasattr(self, 'error_count'):
+                self.error_count = 0
+            self.error_count += 1
+            if self.error_count > 10:
+                self.running = False
+
+        def on_close(ws, close_status_code, close_msg):
+            if hasattr(self, 'logger'):
+                self.logger.info("가격 웹소켓 연결 종료")
+            else:
+                print("가격 웹소켓 연결 종료")
+            # 메모리 정리
+            if hasattr(self, 'price_buffer'):
+                self.price_buffer.clear()
+
+        def on_open(ws):
+            if hasattr(self, 'logger'):
+                self.logger.info("✅ 실시간 가격 웹소켓 연결 성공!")
+            else:
+                print("✅ 실시간 가격 웵소켓 연결 성공!")
+            # 에러 카운터 리셋
+            self.error_count = 0
+
+        # 웹소콓 생성 및 실행 (메모리 최적화 옵션 적용)
+        self.ws = websocket.WebSocketApp(
+            stream_url,
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close
+        )
+        
+        # 웹소켓 실행 (메모리 최적화 옵션)
+        self.ws.run_forever(
+            ping_interval=30,    # 30초마다 ping
+            ping_timeout=10,     # 10초 타임아웃
+            reconnect=3          # 최대 3번 재연결
+        )
+
+    def _emit_batched_prices(self):
+        """배치 처리된 가격 업데이트 emit"""
+        if self.price_buffer:
+            # 복사본 생성 후 버퍼 초기화
+            prices_to_emit = self.price_buffer.copy()
+            self.price_buffer.clear()
+            
+            # GUI에 배치 처리된 가격 전송
+            self.price_updated.emit(prices_to_emit)
+    
     def stop(self):
         self.running = False
+        if hasattr(self, 'update_timer'):
+            self.update_timer.stop()
+        if self.ws:
+            self.ws.close()
         self.wait()
 
 class TradingGUI(QMainWindow):
@@ -69,7 +191,11 @@ class TradingGUI(QMainWindow):
         self.advanced_bot = None
 
         self.current_prices = {}
-
+        
+        # 백그라운드 워커 초기화
+        self.background_worker = None
+        self.update_manager = None
+        
         # 로깅 설정
         logging.basicConfig(
             level=logging.INFO,
@@ -85,6 +211,7 @@ class TradingGUI(QMainWindow):
 
         self.init_ui()
         self.init_price_thread()
+        self.init_background_worker()
 
     def init_ui(self):
         """UI 초기화 - 바이낸스 스타일 (창 크기 최적화)"""
@@ -97,56 +224,22 @@ class TradingGUI(QMainWindow):
 
         # 메인 레이아웃 (수직)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(8)  # 간격 증가
-        main_layout.setContentsMargins(8, 8, 8, 8)  # 여백 증가
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 상단 헤더 (코인 정보)
-        header = self.create_header()
-        main_layout.addWidget(header)
-
-        # 중앙 영역: 차트 + 호가창 (수평 분할)
-        center_layout = QHBoxLayout()
-
-        # 왼쪽: 차트 영역 (큰 비중)
-        chart_container = QWidget()
-        chart_layout = QVBoxLayout(chart_container)
-        chart_layout.setContentsMargins(0, 0, 0, 0)
-
+        # 차트 위젯 초기화 (가장 먼저)
         self.chart_widget = CandlestickChart(self.trading_engine)
-        self.chart_widget.figure.set_size_inches(14, 8)  # 차트 크기 조정
-        self.chart_widget.canvas.setMinimumHeight(500)
-        chart_layout.addWidget(self.chart_widget)
 
-        center_layout.addWidget(chart_container, 3)  # 3:1 비율로 차트가 더 크게
-
-        # 오른쪽: 호가창 영역 🚀 (옵션)
-        if ORDER_BOOK_AVAILABLE:
-            self.order_book_widget = MatplotlibOrderBook(self.trading_engine)
-            self.order_book_widget.setMaximumWidth(350)  # 최대 너비 제한
-            self.order_book_widget.setMinimumWidth(300)  # 최소 너비 설정
-
-            # 호가창 가격 클릭 시 입력창에 자동 입력 🚀
-            self.order_book_widget.price_clicked.connect(self.on_orderbook_price_clicked)
-
-            center_layout.addWidget(self.order_book_widget, 1)  # 1 비율
-        else:
-            # 호가창이 없을 때는 차트만 표시
-            placeholder = QLabel("호가창 모듈을 찾을 수 없습니다")
-            placeholder.setAlignment(Qt.AlignCenter)
-            placeholder.setStyleSheet("color: #888; font-style: italic;")
-            center_layout.addWidget(placeholder, 1)
-
-        main_layout.addLayout(center_layout, 1)
-
-        # 하단 거래 패널
-        bottom_panel = self.create_bottom_panel()
-        main_layout.addWidget(bottom_panel)
-
-        # 상태바 (메시지 제거)
-        self.statusBar().showMessage("")
-
-        # 메뉴바
-        self.create_menu_bar()
+        # 상단 바이낸스 스타일 헤더
+        header = self.create_binance_header()
+        main_layout.addWidget(header)
+        
+        # 메인 탭 위젯
+        main_tabs = self.create_binance_main_tabs()
+        main_layout.addWidget(main_tabs)
+        
+        # 상태바 숨기기
+        self.statusBar().hide()
 
         # 차트 자동 업데이트 스레드
         self.chart_update_thread = ChartUpdateThread(self.chart_widget)
@@ -154,14 +247,22 @@ class TradingGUI(QMainWindow):
         self.chart_update_thread.start()
 
         # 스타일 적용
-        self.apply_binance_theme()
+        self.apply_binance_exchange_theme()
 
-        # 초기 데이터 로드
-        self.update_portfolio_display()
+        # 지연 로딩 - 초기 데이터는 백그라운드에서 처리
+        QTimer.singleShot(1000, self._delayed_initial_load)  # 1초 후 로드
 
     def closeEvent(self, event):
         """애플리케이션 종료 시 정리 작업"""
         try:
+            # 백그라운드 워커 정지
+            if hasattr(self, 'background_worker') and self.background_worker:
+                self.background_worker.stop()
+            
+            # 업데이트 매니저 정지
+            if hasattr(self, 'update_manager') and self.update_manager:
+                self.update_manager.stop()
+            
             # 가격 업데이트 스레드 정지
             if hasattr(self, 'price_thread'):
                 self.price_thread.stop()
@@ -184,6 +285,113 @@ class TradingGUI(QMainWindow):
             self.logger.error(f"애플리케이션 종료 중 오류: {e}")
 
         super().closeEvent(event)
+    
+    def init_background_worker(self):
+        """백그라운드 워커 초기화"""
+        # 백그라운드 워커 생성
+        self.background_worker = BackgroundWorker(
+            self.trading_engine,
+            self.futures_client,
+            self.cross_position_manager
+        )
+        
+        # 시그널 연결
+        self.background_worker.portfolio_updated.connect(self._handle_portfolio_update)
+        self.background_worker.positions_updated.connect(self._handle_positions_update)
+        self.background_worker.error_occurred.connect(self._handle_background_error)
+        
+        # 업데이트 매니저 생성
+        self.update_manager = OptimizedUpdateManager(self)
+        
+        # 백그라운드 워커 시작
+        self.background_worker.start()
+        
+        self.logger.info("📡 백그라운드 워커 초기화 완료")
+    
+    def _delayed_initial_load(self):
+        """지연 초기 데이터 로드"""
+        try:
+            # 작고 가벼운 초기 데이터만 로드
+            summary, _ = self.trading_engine.get_portfolio_status()
+            if summary:
+                self.balance_label.setText(f"잔고: ${summary['total_value']:,.2f}")
+            
+            self.logger.info("🚀 지연 초기 로드 완료")
+        except Exception as e:
+            self.logger.warning(f"초기 로드 오류: {e}")
+    
+    def _handle_portfolio_update(self, portfolio_data):
+        """백그라운드에서 전송된 포트폴리오 데이터 처리"""
+        try:
+            summary = portfolio_data.get('summary')
+            futures_balance = portfolio_data.get('futures_balance', {'balance': 0})
+            total_futures_pnl = portfolio_data.get('total_futures_pnl', 0)
+            
+            if summary:
+                # 현물 + 바이낸스 선물 총 자산 계산
+                spot_value = summary['total_value']
+                futures_value = futures_balance.get('balance', 0) + total_futures_pnl
+                total_combined_value = spot_value + futures_value
+                
+                # UI 업데이트
+                self.balance_label.setText(f"잔고: ${total_combined_value:,.2f}")
+                
+                # 쫌드 색상 계산
+                total_invested = summary.get('total_invested', 1)
+                total_pnl = total_combined_value - total_invested
+                pnl_percentage = (total_pnl / total_invested) * 100 if total_invested > 0 else 0
+                
+                if total_pnl >= 0:
+                    pnl_color = "#0ecb81"  # 초록
+                else:
+                    pnl_color = "#f6465d"  # 빨간
+                
+                # P&L 레이블 업데이트
+                if hasattr(self, 'pnl_label'):
+                    self.pnl_label.setText(f"P&L: ${total_pnl:,.2f} ({pnl_percentage:+.2f}%)")
+                    self.pnl_label.setStyleSheet(f"font-size: 16px; color: {pnl_color}; margin-left: 10px;")
+        
+        except Exception as e:
+            self.logger.error(f"포트폴리오 업데이트 처리 오류: {e}")
+    
+    def _handle_positions_update(self, positions_data):
+        """백그라운드에서 전송된 포지션 데이터 처리"""
+        try:
+            if hasattr(self, 'leverage_history_table'):
+                self._update_positions_table(positions_data)
+        except Exception as e:
+            self.logger.error(f"포지션 업데이트 처리 오류: {e}")
+    
+    def _handle_background_error(self, error_message):
+        """백그라운드 오류 처리"""
+        self.logger.error(f"백그라운드 오류: {error_message}")
+    
+    def update_prices_batch(self, prices):
+        """배치 처리된 가격 업데이트 (기존 update_prices 대체)"""
+        try:
+            # 가격 데이터 업데이트
+            self.current_prices.update(prices)
+            
+            # 현재 선택된 심볼의 가격만 업데이트
+            if hasattr(self, 'symbol_combo'):
+                current_symbol = self.symbol_combo.currentText()
+                if current_symbol in prices:
+                    current_price = prices[current_symbol]
+                    
+                    # 가격 레이블 업데이트
+                    if hasattr(self, 'price_label'):
+                        self.price_label.setText(f"${current_price:,.4f}")
+            
+            # 현물 및 레버리지 P&L 업데이트
+            self.update_trading_history_pnl()
+            self.update_leverage_positions_pnl()
+            
+            # 원래 함수에서 필수적인 부분만 유지
+            if hasattr(self, 'update_manager'):
+                self.update_manager.request_prices_update()
+                
+        except Exception as e:
+            self.logger.error(f"배치 가격 업데이트 오류: {e}")
 
     def apply_binance_theme(self):
         """바이낸스 스타일 테마 적용"""
@@ -317,11 +525,11 @@ class TradingGUI(QMainWindow):
         """)
         left_section.addWidget(self.coin_icon)
 
-        # 심볼 선택
-        self.main_symbol_combo = QComboBox()
-        self.main_symbol_combo.addItems(Config.SUPPORTED_PAIRS)
-        self.main_symbol_combo.currentTextChanged.connect(self.on_main_symbol_changed)
-        self.main_symbol_combo.setStyleSheet("""
+        # 심볼 선택 (헤더용)
+        self.header_symbol_combo = QComboBox()
+        self.header_symbol_combo.addItems(Config.SUPPORTED_PAIRS)
+        self.header_symbol_combo.currentTextChanged.connect(self.on_main_symbol_changed)
+        self.header_symbol_combo.setStyleSheet("""
             QComboBox {
                 font-size: 14px;
                 font-weight: bold;
@@ -330,7 +538,7 @@ class TradingGUI(QMainWindow):
                 color: #f0f0f0;
             }
         """)
-        left_section.addWidget(self.main_symbol_combo)
+        left_section.addWidget(self.header_symbol_combo)
 
         # 가격
         self.main_price_label = QLabel("$117,799.99")
@@ -370,6 +578,114 @@ class TradingGUI(QMainWindow):
         layout.addLayout(right_section)
 
         return header
+
+    def create_right_trading_panel(self):
+        """호가창 아래 거래 패널 - 매수/레버리지/봇 기능"""
+        panel = QFrame()
+        panel.setStyleSheet("""
+            QFrame {
+                background-color: #1e2329;
+                border: 1px solid #2b3139;
+                border-radius: 6px;
+                margin: 2px;
+            }
+        """)
+        
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        # 탭 위젯 추가
+        tab_widget = QTabWidget()
+        tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #2b3139;
+                background-color: #1e2329;
+                border-radius: 4px;
+            }
+            QTabBar::tab {
+                background-color: #2b3139;
+                color: #f0f0f0;
+                padding: 8px 12px;
+                margin-right: 1px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                font-size: 11px;
+            }
+            QTabBar::tab:selected {
+                background-color: #f0b90b;
+                color: #000;
+                font-weight: bold;
+            }
+        """)
+        
+        # 현물 거래 탭
+        spot_tab = self.create_compact_spot_tab()
+        tab_widget.addTab(spot_tab, "💰 현물")
+        
+        # 레버리지 거래 탭
+        leverage_tab = self.create_compact_leverage_tab()
+        tab_widget.addTab(leverage_tab, "🚀 레버리지")
+        
+        # 트레이딩봇 탭
+        bot_tab = self.create_compact_bot_tab()
+        tab_widget.addTab(bot_tab, "🤖 봇")
+        
+        layout.addWidget(tab_widget)
+        return panel
+
+    def create_trading_history_panel(self):
+        """하단 거래내역 패널"""
+        panel = QFrame()
+        panel.setFixedHeight(300)
+        panel.setStyleSheet("""
+            QFrame {
+                background-color: #1e2329;
+                border: 1px solid #2b3139;
+                border-radius: 6px;
+                margin: 2px;
+            }
+        """)
+        
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        # 탭 위젯 추가
+        tab_widget = QTabWidget()
+        tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #2b3139;
+                background-color: #1e2329;
+                border-radius: 4px;
+            }
+            QTabBar::tab {
+                background-color: #2b3139;
+                color: #f0f0f0;
+                padding: 12px 20px;
+                margin-right: 2px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+            }
+            QTabBar::tab:selected {
+                background-color: #f0b90b;
+                color: #000;
+                font-weight: bold;
+            }
+        """)
+        
+        # 현물 보유내역 탭
+        spot_history_tab = self.create_spot_history_tab()
+        tab_widget.addTab(spot_history_tab, "💰 현물 보유내역")
+        
+        # 레버리지 보유현황 탭
+        leverage_history_tab = self.create_leverage_history_tab()
+        tab_widget.addTab(leverage_history_tab, "🚀 레버리지 보유현황")
+        
+        # 봇 거래내역 탭
+        bot_history_tab = self.create_bot_history_tab()
+        tab_widget.addTab(bot_history_tab, "🤖 봇 거래내역")
+        
+        layout.addWidget(tab_widget)
+        return panel
 
     def create_bottom_panel(self):
         """하단 거래 패널 생성 - 레버리지 거래 추가"""
@@ -519,7 +835,7 @@ class TradingGUI(QMainWindow):
         leverage_section.addWidget(leverage_label)
 
         self.leverage_combo = QComboBox()
-        self.leverage_combo.addItems(["5x", "10x", "20x", "50x", "100x"])
+        self.leverage_combo.addItems(["1x", "2x", "3x", "5x", "10x", "20x", "50x", "75x", "100x", "125x"])
         self.leverage_combo.setCurrentText("10x")
         self.leverage_combo.setMaximumWidth(150)  # 너비 증가
         self.leverage_combo.setStyleSheet("""
@@ -909,6 +1225,1746 @@ class TradingGUI(QMainWindow):
         layout.addStretch()
         return tab
 
+    def create_compact_spot_tab(self):
+        """호가창 아래 현물 거래 탭 (컴팩트)"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # 심볼 선택
+        symbol_layout = QHBoxLayout()
+        symbol_layout.addWidget(QLabel("코인:"))
+        self.compact_symbol_combo = QComboBox()
+        self.compact_symbol_combo.addItems(Config.SUPPORTED_PAIRS)
+        self.compact_symbol_combo.setCurrentText("SOLUSDT")
+        symbol_layout.addWidget(self.compact_symbol_combo)
+        layout.addLayout(symbol_layout)
+        
+        # 수량 입력
+        amount_layout = QHBoxLayout()
+        amount_layout.addWidget(QLabel("수량:"))
+        self.compact_amount_input = QLineEdit("100")
+        amount_layout.addWidget(self.compact_amount_input)
+        layout.addLayout(amount_layout)
+        
+        # 매수/매도 버튼
+        button_layout = QHBoxLayout()
+        buy_btn = QPushButton("💰 매수")
+        buy_btn.setStyleSheet("QPushButton { background-color: #00C851; color: white; padding: 8px; }")
+        buy_btn.clicked.connect(self.compact_spot_buy)
+        
+        sell_btn = QPushButton("📉 매도")
+        sell_btn.setStyleSheet("QPushButton { background-color: #ff4444; color: white; padding: 8px; }")
+        sell_btn.clicked.connect(self.compact_spot_sell)
+        
+        button_layout.addWidget(buy_btn)
+        button_layout.addWidget(sell_btn)
+        layout.addLayout(button_layout)
+        
+        return tab
+
+    def create_compact_leverage_tab(self):
+        """호가창 아래 레버리지 거래 탭 (컴팩트)"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # 심볼 선택
+        symbol_layout = QHBoxLayout()
+        symbol_layout.addWidget(QLabel("코인:"))
+        self.compact_lev_symbol_combo = QComboBox()
+        self.compact_lev_symbol_combo.addItems(Config.SUPPORTED_PAIRS)
+        symbol_layout.addWidget(self.compact_lev_symbol_combo)
+        layout.addLayout(symbol_layout)
+        
+        # 레버리지/수량
+        settings_layout = QHBoxLayout()
+        settings_layout.addWidget(QLabel("레버리지:"))
+        self.compact_lev_combo = QComboBox()
+        self.compact_lev_combo.addItems(["1x", "2x", "3x", "5x", "10x"])
+        self.compact_lev_combo.setCurrentText("3x")
+        settings_layout.addWidget(self.compact_lev_combo)
+        
+        settings_layout.addWidget(QLabel("수량:"))
+        self.compact_lev_amount_input = QLineEdit("100")
+        settings_layout.addWidget(self.compact_lev_amount_input)
+        layout.addLayout(settings_layout)
+        
+        # 롱/숏 버튼
+        button_layout = QHBoxLayout()
+        long_btn = QPushButton("🚀 롱")
+        long_btn.setStyleSheet("QPushButton { background-color: #00C851; color: white; padding: 8px; }")
+        long_btn.clicked.connect(self.compact_leverage_long)
+        
+        short_btn = QPushButton("📉 숏")
+        short_btn.setStyleSheet("QPushButton { background-color: #ff4444; color: white; padding: 8px; }")
+        short_btn.clicked.connect(self.compact_leverage_short)
+        
+        button_layout.addWidget(long_btn)
+        button_layout.addWidget(short_btn)
+        layout.addLayout(button_layout)
+        
+        return tab
+
+    def create_compact_bot_tab(self):
+        """호가창 아래 트레이딩봇 탭 (컴팩트)"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # 전략 선택
+        strategy_layout = QHBoxLayout()
+        strategy_layout.addWidget(QLabel("전략:"))
+        self.compact_bot_strategy_combo = QComboBox()
+        self.compact_bot_strategy_combo.addItems([
+            "macd_final", "ma_crossover", "rsi_leverage",
+            "bollinger_band", "momentum_spike", "triple_ma"
+        ])
+        strategy_layout.addWidget(self.compact_bot_strategy_combo)
+        layout.addLayout(strategy_layout)
+        
+        # 수량 입력
+        amount_layout = QHBoxLayout()
+        amount_layout.addWidget(QLabel("수량:"))
+        self.compact_bot_amount_input = QLineEdit("200")
+        amount_layout.addWidget(self.compact_bot_amount_input)
+        layout.addLayout(amount_layout)
+        
+        # 시작/정지 버튼
+        button_layout = QHBoxLayout()
+        start_btn = QPushButton("▶️ 시작")
+        start_btn.setStyleSheet("QPushButton { background-color: #00C851; color: white; padding: 8px; }")
+        start_btn.clicked.connect(self.start_trading_bot)
+        
+        stop_btn = QPushButton("⏹️ 정지")
+        stop_btn.setStyleSheet("QPushButton { background-color: #ff4444; color: white; padding: 8px; }")
+        stop_btn.clicked.connect(self.stop_trading_bot)
+        
+        button_layout.addWidget(start_btn)
+        button_layout.addWidget(stop_btn)
+        layout.addLayout(button_layout)
+        
+        return tab
+
+    def create_spot_history_tab(self):
+        """현물 보유내역 탭"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # 보유내역 테이블
+        self.spot_history_table = QTableWidget()
+        self.spot_history_table.setColumnCount(5)
+        self.spot_history_table.setHorizontalHeaderLabels([
+            "코인", "수량", "구매가", "현재가", "손익"
+        ])
+        self.spot_history_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #2b3139;
+                alternate-background-color: #1e2329;
+                color: white;
+                gridline-color: #404040;
+            }
+            QHeaderView::section {
+                background-color: #f0b90b;
+                color: black;
+                font-weight: bold;
+                padding: 8px;
+            }
+        """)
+        layout.addWidget(self.spot_history_table)
+        
+        # 초기 데이터 로드
+        self.load_spot_history()
+        
+        return tab
+
+    def create_leverage_history_tab(self):
+        """레버리지 보유현황 탭"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # 헤더
+        header_layout = QHBoxLayout()
+        header_label = QLabel("🚀 레버리지 포지션 보유현황")
+        header_label.setStyleSheet("color: white; font-size: 14px; font-weight: bold; padding: 10px;")
+        header_layout.addWidget(header_label)
+        
+        # 새로고침 버튼 제거 - 실시간 업데이트로 불필요
+        
+        header_layout.addStretch()
+        layout.addLayout(header_layout)
+        
+        # 보유현황 테이블 (상태 콜럼 제거)
+        self.leverage_history_table = QTableWidget()
+        self.leverage_history_table.setColumnCount(8)
+        self.leverage_history_table.setHorizontalHeaderLabels([
+            "심볼", "방향", "레버리지", "진입가", "현재가", "수량", "손익(USDT)", "손익률(%)"
+        ])
+        self.leverage_history_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #2b3139;
+                alternate-background-color: #1e2329;
+                color: white;
+                gridline-color: #404040;
+            }
+            QHeaderView::section {
+                background-color: #f0b90b;
+                color: black;
+                font-weight: bold;
+                padding: 8px;
+            }
+        """)
+        layout.addWidget(self.leverage_history_table)
+        
+        # 초기 데이터 로드
+        self.refresh_leverage_positions()
+        
+        return tab
+    
+    def refresh_leverage_positions(self):
+        """레버리지 포지션 새로고침"""
+        try:
+            print("🔄 레버리지 포지션 새로고침 중...")
+            
+            # 활성 포지션 가져오기
+            active_positions = self.cross_position_manager.get_active_positions()
+            
+            # 테이블 초기화
+            self.leverage_history_table.setRowCount(0)
+            
+            if not active_positions:
+                # 포지션이 없을 때 메시지 표시
+                self.leverage_history_table.setRowCount(1)
+                no_position_item = QTableWidgetItem("현재 보유 중인 레버리지 포지션이 없습니다.")
+                no_position_item.setTextAlignment(Qt.AlignCenter)
+                self.leverage_history_table.setSpan(0, 0, 1, 9)
+                self.leverage_history_table.setItem(0, 0, no_position_item)
+                return
+            
+            # 포지션별로 행 추가
+            self.leverage_history_table.setRowCount(len(active_positions))
+            
+            for row, position in enumerate(active_positions):
+                try:
+                    # 현재가 가져오기
+                    current_price = self.current_prices.get(position['symbol'], position['entry_price'])
+                    
+                    # 손익 계산
+                    if position['side'].upper() == 'LONG':
+                        pnl_usdt = (current_price - position['entry_price']) * position['quantity']
+                        pnl_percent = ((current_price / position['entry_price']) - 1) * 100 * position['leverage']
+                    else:  # SHORT
+                        pnl_usdt = (position['entry_price'] - current_price) * position['quantity']
+                        pnl_percent = ((position['entry_price'] / current_price) - 1) * 100 * position['leverage']
+                    
+                    # 테이블 아이템 설정
+                    items = [
+                        position['symbol'],
+                        "🟢 롱" if position['side'].upper() == 'LONG' else "🔴 숏",
+                        f"{position['leverage']}x",
+                        f"${position['entry_price']:,.2f}",
+                        f"${current_price:,.2f}",
+                        f"{position['quantity']:.6f}",
+                        f"${pnl_usdt:,.2f}",
+                        f"{pnl_percent:+.2f}%",
+                        "🟢 활성" if pnl_usdt >= 0 else "🔴 손실"
+                    ]
+                    
+                    for col, item_text in enumerate(items):
+                        item = QTableWidgetItem(str(item_text))
+                        item.setTextAlignment(Qt.AlignCenter)
+                        
+                        # 손익에 따른 색상 설정
+                        if col == 6 or col == 7:  # 손익 USDT, 손익률
+                            if pnl_usdt >= 0:
+                                item.setForeground(QColor('#0ecb81'))  # 초록색
+                            else:
+                                item.setForeground(QColor('#f6465d'))  # 빨간색
+                        elif col == 1:  # 방향
+                            if "롱" in item_text:
+                                item.setForeground(QColor('#0ecb81'))
+                            else:
+                                item.setForeground(QColor('#f6465d'))
+                        else:
+                            item.setForeground(QColor('white'))
+                        
+                        self.leverage_history_table.setItem(row, col, item)
+                        
+                except Exception as e:
+                    print(f"포지션 {row} 처리 오류: {e}")
+                    continue
+            
+            # 테이블 열 너비 자동 조정
+            self.leverage_history_table.resizeColumnsToContents()
+            
+            print(f"✅ 레버리지 포지션 {len(active_positions)}개 로드 완료")
+            
+        except Exception as e:
+            print(f"❌ 레버리지 포지션 새로고침 오류: {e}")
+            QMessageBox.warning(self, "오류", f"포지션 로드 중 오류가 발생했습니다:\n{e}")
+
+    def create_bot_history_tab(self):
+        """봇 거래내역 탭"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # 거래내역 테이블
+        self.bot_history_table = QTableWidget()
+        self.bot_history_table.setColumnCount(7)
+        self.bot_history_table.setHorizontalHeaderLabels([
+            "시간", "코인", "전략", "유형", "수량", "가격", "손익"
+        ])
+        self.bot_history_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #2b3139;
+                alternate-background-color: #1e2329;
+                color: white;
+                gridline-color: #404040;
+            }
+            QHeaderView::section {
+                background-color: #f0b90b;
+                color: black;
+                font-weight: bold;
+                padding: 8px;
+            }
+        """)
+        layout.addWidget(self.bot_history_table)
+        
+        return tab
+
+    def compact_spot_buy(self):
+        """컴팩트 현물 매수"""
+        try:
+            symbol = self.compact_symbol_combo.currentText()
+            amount = float(self.compact_amount_input.text())
+            
+            if amount <= 0:
+                QMessageBox.warning(self, "입력 오류", "올바른 금액을 입력해주세요.")
+                return
+                
+            # 현재 가격 가져오기
+            current_price = self.trading_engine.get_current_price(symbol)
+            if not current_price:
+                QMessageBox.warning(self, "가격 오류", f"{symbol} 가격을 가져올 수 없습니다.")
+                return
+                
+            quantity = amount / current_price
+            
+            # 매수 실행
+            success = self.trading_engine.place_buy_order(
+                symbol=symbol,
+                amount_usd=amount
+            )
+            
+            if success:
+                QMessageBox.information(self, "매수 완료", 
+                                      f"{symbol} ${amount:.2f} 매수 완료\n"
+                                      f"수량: {quantity:.6f}\n"
+                                      f"가격: ${current_price:.4f}")
+                self.update_portfolio_display()
+            else:
+                QMessageBox.warning(self, "매수 실패", "매수 주문이 실패했습니다.")
+                
+        except ValueError:
+            QMessageBox.warning(self, "입력 오류", "올바른 숫자를 입력해주세요.")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"매수 중 오류가 발생했습니다:\n{e}")
+
+    def compact_spot_sell(self):
+        """컴팩트 현물 매도"""
+        try:
+            symbol = self.compact_symbol_combo.currentText()
+            amount = float(self.compact_amount_input.text())
+            
+            if amount <= 0:
+                QMessageBox.warning(self, "입력 오류", "올바른 금액을 입력해주세요.")
+                return
+                
+            # 현재 가격 가져오기
+            current_price = self.trading_engine.get_current_price(symbol)
+            if not current_price:
+                QMessageBox.warning(self, "가격 오류", f"{symbol} 가격을 가져올 수 없습니다.")
+                return
+                
+            quantity = amount / current_price
+            
+            # 매도 실행  
+            success = self.trading_engine.place_sell_order(
+                symbol=symbol,
+                quantity=quantity
+            )
+            
+            if success:
+                QMessageBox.information(self, "매도 완료", 
+                                      f"{symbol} ${amount:.2f} 매도 완료\n"
+                                      f"수량: {quantity:.6f}\n"
+                                      f"가격: ${current_price:.4f}")
+                self.update_portfolio_display()
+            else:
+                QMessageBox.warning(self, "매도 실패", "매도 주문이 실패했습니다.")
+                
+        except ValueError:
+            QMessageBox.warning(self, "입력 오류", "올바른 숫자를 입력해주세요.")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"매도 중 오류가 발생했습니다:\n{e}")
+
+    def compact_leverage_long(self):
+        """컴팩트 레버리지 롱"""
+        try:
+            symbol = self.compact_lev_symbol_combo.currentText()
+            amount = float(self.compact_lev_amount_input.text())
+            leverage_text = self.compact_lev_combo.currentText()
+            leverage = int(leverage_text.replace('x', ''))
+            
+            if amount <= 0:
+                QMessageBox.warning(self, "입력 오류", "올바른 금액을 입력해주세요.")
+                return
+                
+            # 레버리지 롱 포지션 열기
+            current_price = self.trading_engine.get_current_price(symbol)
+            quantity = amount / current_price
+            margin_required = amount / leverage
+            
+            success = self.cross_position_manager.open_position(
+                symbol=symbol,
+                side='LONG',
+                quantity=quantity,
+                price=current_price,
+                leverage=leverage,
+                margin_required=margin_required
+            )
+            
+            if success:
+                QMessageBox.information(self, "롱 포지션 오픈", 
+                                      f"{symbol} 롱 포지션 오픈\n"
+                                      f"금액: ${amount:.2f}\n"
+                                      f"레버리지: {leverage}x")
+                self.update_portfolio_display()
+            else:
+                QMessageBox.warning(self, "포지션 실패", "롱 포지션 오픈이 실패했습니다.")
+                
+        except ValueError:
+            QMessageBox.warning(self, "입력 오류", "올바른 숫자를 입력해주세요.")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"롱 포지션 오픈 중 오류가 발생했습니다:\n{e}")
+
+    def compact_leverage_short(self):
+        """컴팩트 레버리지 숏"""
+        try:
+            symbol = self.compact_lev_symbol_combo.currentText()
+            amount = float(self.compact_lev_amount_input.text())
+            leverage_text = self.compact_lev_combo.currentText()
+            leverage = int(leverage_text.replace('x', ''))
+            
+            if amount <= 0:
+                QMessageBox.warning(self, "입력 오류", "올바른 금액을 입력해주세요.")
+                return
+                
+            # 레버리지 숏 포지션 열기
+            current_price = self.trading_engine.get_current_price(symbol)
+            quantity = amount / current_price
+            margin_required = amount / leverage
+            
+            success = self.cross_position_manager.open_position(
+                symbol=symbol,
+                side='SHORT',
+                quantity=quantity,
+                price=current_price,
+                leverage=leverage,
+                margin_required=margin_required
+            )
+            
+            if success:
+                QMessageBox.information(self, "숏 포지션 오픈", 
+                                      f"{symbol} 숏 포지션 오픈\n"
+                                      f"금액: ${amount:.2f}\n"
+                                      f"레버리지: {leverage}x")
+                self.update_portfolio_display()
+            else:
+                QMessageBox.warning(self, "포지션 실패", "숏 포지션 오픈이 실패했습니다.")
+                
+        except ValueError:
+            QMessageBox.warning(self, "입력 오류", "올바른 숫자를 입력해주세요.")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"숏 포지션 오픈 중 오류가 발생했습니다:\n{e}")
+
+    def create_binance_header(self):
+        """바이낸스 스타일 상단 헤더"""
+        header = QFrame()
+        header.setFixedHeight(60)
+        header.setStyleSheet("""
+            QFrame {
+                background-color: #1e2329;
+                border-bottom: 1px solid #2b3139;
+            }
+        """)
+        
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(20, 10, 20, 10)
+        
+        # 왼쪽: 코인 정보
+        left_section = QHBoxLayout()
+        
+        # 코인 심볼
+        self.symbol_label = QLabel("BTCUSDT")
+        self.symbol_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+            }
+        """)
+        left_section.addWidget(self.symbol_label)
+        
+        # 현재 가격
+        self.current_price_label = QLabel("$118334.5900")
+        self.current_price_label.setStyleSheet("""
+            QLabel {
+                color: #0ecb81;
+                font-size: 24px;
+                font-weight: bold;
+                margin-left: 20px;
+            }
+        """)
+        left_section.addWidget(self.current_price_label)
+        
+        # 변화율
+        self.change_label = QLabel("- 504 candles - Last update: 02:29:58")
+        self.change_label.setStyleSheet("""
+            QLabel {
+                color: #848e9c;
+                font-size: 12px;
+                margin-left: 10px;
+            }
+        """)
+        left_section.addWidget(self.change_label)
+        
+        layout.addLayout(left_section)
+        layout.addStretch()
+        
+        # 오른쪽: 사용자 정보
+        self.balance_label = QLabel("잔고: $0.00")
+        self.balance_label.setStyleSheet("""
+            QLabel {
+                color: #f0b90b;
+                font-size: 14px;
+                font-weight: bold;
+            }
+        """)
+        layout.addWidget(self.balance_label)
+        
+        return header
+
+    def create_binance_main_tabs(self):
+        """바이낸스 스타일 메인 탭"""
+        main_container = QFrame()
+        main_container.setStyleSheet("QFrame { background-color: #0b0e11; }")
+        
+        layout = QVBoxLayout(main_container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # 상단 탭 바 제거됨
+        
+        # 메인 컨텐츠 영역
+        content_area = QHBoxLayout()
+        content_area.setContentsMargins(0, 0, 0, 0)
+        content_area.setSpacing(0)
+        
+        # 왼쪽: 거래 패널들
+        left_panel = self.create_binance_left_panel()
+        content_area.addWidget(left_panel, 1)
+        
+        # 중앙: 차트
+        chart_panel = self.create_binance_chart_panel()
+        content_area.addWidget(chart_panel, 3)
+        
+        # 오른쪽: 호가창
+        right_panel = self.create_binance_right_panel()
+        content_area.addWidget(right_panel, 1)
+        
+        layout.addLayout(content_area)
+        
+        # 하단: 거래내역
+        bottom_panel = self.create_binance_bottom_panel()
+        layout.addWidget(bottom_panel)
+        
+        return main_container
+
+    def create_binance_tab_bar(self):
+        """바이낸스 스타일 탭 바"""
+        tab_container = QFrame()
+        tab_container.setFixedHeight(50)
+        tab_container.setStyleSheet("""
+            QFrame {
+                background-color: #1e2329;
+                border-bottom: 1px solid #2b3139;
+            }
+        """)
+        
+        layout = QHBoxLayout(tab_container)
+        layout.setContentsMargins(20, 0, 20, 0)
+        
+        # 탭 버튼들
+        tabs = [
+            ("🔒 Spot 보유", True),
+            ("⚡ Cross 포지션", False),
+            ("📊 Spot 거래", False),
+            ("🚀 Cross 내역", False),
+            ("🤖 트레이딩봇", False)
+        ]
+        
+        for tab_name, is_active in tabs:
+            btn = QPushButton(tab_name)
+            if is_active:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #f0b90b;
+                        color: black;
+                        border: none;
+                        padding: 12px 20px;
+                        font-weight: bold;
+                        border-radius: 4px;
+                    }
+                """)
+            else:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: transparent;
+                        color: #848e9c;
+                        border: none;
+                        padding: 12px 20px;
+                    }
+                    QPushButton:hover {
+                        background-color: #2b3139;
+                        color: white;
+                    }
+                """)
+            layout.addWidget(btn)
+        
+        layout.addStretch()
+        return tab_container
+
+    def create_binance_left_panel(self):
+        """바이낸스 스타일 왼쪽 거래 패널"""
+        panel = QFrame()
+        panel.setMaximumWidth(350)
+        panel.setStyleSheet("""
+            QFrame {
+                background-color: #1e2329;
+                border-right: 1px solid #2b3139;
+            }
+        """)
+        
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        # 심볼 선택 제거 - 헤더의 심볼 콤보박스만 사용
+        # 호환성을 위해 main_symbol_combo를 header_symbol_combo로 연결
+        if hasattr(self, 'header_symbol_combo'):
+            self.main_symbol_combo = self.header_symbol_combo  # 호환성을 위해 변수 연결
+        
+        # 거래 유형 탭
+        trade_tabs = QTabWidget()
+        trade_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #2b3139;
+                background-color: #1e2329;
+            }
+            QTabBar::tab {
+                background-color: #2b3139;
+                color: #848e9c;
+                padding: 10px 20px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #f0b90b;
+                color: black;
+                font-weight: bold;
+            }
+        """)
+        
+        # 현물 거래 탭
+        spot_tab = self.create_binance_spot_tab()
+        trade_tabs.addTab(spot_tab, "현물")
+        
+        # 레버리지 거래 탭
+        leverage_tab = self.create_binance_leverage_tab()
+        trade_tabs.addTab(leverage_tab, "레버리지")
+        
+        # 트레이딩봇 탭
+        if ADVANCED_BOT_AVAILABLE:
+            trading_bot_tab = self.create_trading_bot_tab()
+            trade_tabs.addTab(trading_bot_tab, "🤖 트레이딩봇")
+        
+        layout.addWidget(trade_tabs)
+        layout.addStretch()
+        
+        return panel
+
+    def create_binance_chart_panel(self):
+        """바이낸스 스타일 차트 패널"""
+        panel = QFrame()
+        panel.setStyleSheet("""
+            QFrame {
+                background-color: #0b0e11;
+            }
+        """)
+        
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        # 차트 헤더
+        chart_header = QFrame()
+        chart_header.setFixedHeight(40)
+        chart_header.setStyleSheet("""
+            QFrame {
+                background-color: #1e2329;
+                border-radius: 4px;
+            }
+        """)
+        
+        header_layout = QHBoxLayout(chart_header)
+        header_layout.setContentsMargins(15, 0, 15, 0)
+        
+        # 차트 제어 버튼들
+        controls = ["🔥 실시간", "📊 선형", "📈 상승", "📊 설정"]
+        for control in controls:
+            btn = QPushButton(control)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2b3139;
+                    color: white;
+                    border: none;
+                    padding: 8px 12px;
+                    border-radius: 4px;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background-color: #848e9c;
+                }
+            """)
+            header_layout.addWidget(btn)
+        
+        header_layout.addStretch()
+        layout.addWidget(chart_header)
+        
+        # 차트
+        layout.addWidget(self.chart_widget)
+        
+        return panel
+
+    def create_binance_right_panel(self):
+        """바이낸스 스타일 오른쪽 호가창 패널"""
+        panel = QFrame()
+        panel.setMaximumWidth(300)
+        panel.setStyleSheet("""
+            QFrame {
+                background-color: #1e2329;
+                border-left: 1px solid #2b3139;
+            }
+        """)
+        
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        # 호가창 헤더
+        header_label = QLabel("📊 호가창")
+        header_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+                margin-bottom: 10px;
+            }
+        """)
+        layout.addWidget(header_label)
+        
+        # 호가창 위젯
+        if ORDER_BOOK_AVAILABLE:
+            self.order_book_widget = MatplotlibOrderBook(self.trading_engine)
+            # 호가창 가격 클릭 시그널 연결
+            self.order_book_widget.price_clicked.connect(self.on_orderbook_price_clicked)
+            layout.addWidget(self.order_book_widget)
+            
+            # 현재 선택된 심볼로 초기화 (약간의 지연 후)
+            # 콤보박스가 완전히 초기화된 후에 호가창 심볼 설정
+            def init_orderbook_symbol():
+                current_symbol = self.header_symbol_combo.currentText() if hasattr(self, 'header_symbol_combo') else "BTCUSDT"
+                print(f"[호가창 초기화] 심볼: {current_symbol}")
+                if hasattr(self, 'order_book_widget'):
+                    self.order_book_widget.set_symbol(current_symbol)
+            
+            QTimer.singleShot(1000, init_orderbook_symbol)  # 1초 후 초기화
+        else:
+            placeholder = QLabel("호가창 모듈을 찾을 수 없습니다")
+            placeholder.setAlignment(Qt.AlignCenter)
+            placeholder.setStyleSheet("color: #848e9c; font-style: italic;")
+            layout.addWidget(placeholder)
+        
+        return panel
+
+    def create_binance_bottom_panel(self):
+        """바이낸스 스타일 하단 거래내역 패널"""
+        panel = QFrame()
+        panel.setFixedHeight(250)
+        panel.setStyleSheet("""
+            QFrame {
+                background-color: #1e2329;
+                border-top: 1px solid #2b3139;
+            }
+        """)
+        
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        # 하단 탭 위젯
+        bottom_tabs = QTabWidget()
+        bottom_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #2b3139;
+                background-color: #1e2329;
+            }
+            QTabBar::tab {
+                background-color: #2b3139;
+                color: #848e9c;
+                padding: 8px 16px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #f0b90b;
+                color: black;
+                font-weight: bold;
+            }
+        """)
+        
+        # 거래내역 탭들
+        spot_history = self.create_spot_history_tab()
+        bottom_tabs.addTab(spot_history, "현물 보유내역")
+        
+        leverage_history = self.create_leverage_history_tab()
+        bottom_tabs.addTab(leverage_history, "레버리지 보유현황")
+        
+        bot_history = self.create_bot_history_tab()
+        bottom_tabs.addTab(bot_history, "봇 거래내역")
+        
+        layout.addWidget(bottom_tabs)
+        return panel
+
+    def create_binance_spot_tab(self):
+        """바이낸스 스타일 현물 거래 탭"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        # 타입 선택
+        type_layout = QHBoxLayout()
+        limit_btn = QPushButton("지정가")
+        market_btn = QPushButton("시장가")
+        
+        for btn in [limit_btn, market_btn]:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2b3139;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #848e9c;
+                }
+            """)
+        
+        market_btn.setStyleSheet(market_btn.styleSheet() + "background-color: #f0b90b; color: black;")
+        
+        type_layout.addWidget(limit_btn)
+        type_layout.addWidget(market_btn)
+        layout.addLayout(type_layout)
+        
+        # 가격 입력
+        price_label = QLabel("가격")
+        price_label.setStyleSheet("color: white; font-size: 12px;")
+        layout.addWidget(price_label)
+        
+        self.spot_price_input = QLineEdit()
+        self.spot_price_input.setPlaceholderText("시장가")
+        self.spot_price_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #2b3139;
+                color: white;
+                border: 1px solid #848e9c;
+                padding: 8px;
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(self.spot_price_input)
+        
+        # 수량 입력
+        amount_label = QLabel("수량 (USDT)")
+        amount_label.setStyleSheet("color: white; font-size: 12px;")
+        layout.addWidget(amount_label)
+        
+        self.spot_amount_input = QLineEdit()
+        self.spot_amount_input.setPlaceholderText("0.00")
+        self.spot_amount_input.setStyleSheet(self.spot_price_input.styleSheet())
+        layout.addWidget(self.spot_amount_input)
+        
+        # 자산 비율 슬라이더
+        slider_label = QLabel("자산 비율")
+        slider_label.setStyleSheet("color: white; font-size: 12px;")
+        layout.addWidget(slider_label)
+        
+        self.asset_ratio_slider = QSlider(Qt.Horizontal)
+        self.asset_ratio_slider.setMinimum(0)
+        self.asset_ratio_slider.setMaximum(100)
+        self.asset_ratio_slider.setValue(10)  # 기본값 10%
+        self.asset_ratio_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #848e9c;
+                height: 8px;
+                background: #2b3139;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #f0b90b;
+                border: 1px solid #848e9c;
+                width: 18px;
+                margin: -5px 0;
+                border-radius: 9px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #f0b90b;
+                border-radius: 4px;
+            }
+        """)
+        self.asset_ratio_slider.valueChanged.connect(self.on_slider_changed)
+        layout.addWidget(self.asset_ratio_slider)
+        
+        # 슬라이더 값 표시
+        self.slider_value_label = QLabel("10% (약 $0)")
+        self.slider_value_label.setStyleSheet("color: #848e9c; font-size: 11px;")
+        layout.addWidget(self.slider_value_label)
+        
+        # 매수/매도 버튼
+        button_layout = QHBoxLayout()
+        
+        buy_btn = QPushButton("매수 BTC")
+        buy_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0ecb81;
+                color: white;
+                border: none;
+                padding: 12px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #00a85a;
+            }
+        """)
+        
+        sell_btn = QPushButton("매도 BTC")
+        sell_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f6465d;
+                color: white;
+                border: none;
+                padding: 12px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #d33f4a;
+            }
+        """)
+        
+        button_layout.addWidget(buy_btn)
+        button_layout.addWidget(sell_btn)
+        layout.addLayout(button_layout)
+        
+        buy_btn.clicked.connect(self.binance_spot_buy)
+        sell_btn.clicked.connect(self.binance_spot_sell)
+        
+        layout.addStretch()
+        return tab
+
+    def create_binance_leverage_tab(self):
+        """바이낸스 스타일 레버리지 거래 탭"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        # 레버리지 설정
+        leverage_layout = QHBoxLayout()
+        leverage_label = QLabel("레버리지:")
+        leverage_label.setStyleSheet("color: white; font-size: 12px;")
+        leverage_layout.addWidget(leverage_label)
+        
+        self.leverage_combo = QComboBox()
+        self.leverage_combo.addItems(["1x", "2x", "3x", "5x", "10x", "20x"])
+        self.leverage_combo.setCurrentText("10x")
+        self.leverage_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #2b3139;
+                color: white;
+                border: 1px solid #848e9c;
+                padding: 6px;
+                border-radius: 4px;
+            }
+        """)
+        leverage_layout.addWidget(self.leverage_combo)
+        layout.addLayout(leverage_layout)
+        
+        # 가격 입력
+        price_label = QLabel("가격 (USDT)")
+        price_label.setStyleSheet("color: white; font-size: 12px;")
+        layout.addWidget(price_label)
+        
+        self.lev_price_input = QLineEdit()
+        self.lev_price_input.setPlaceholderText("시장가")
+        self.lev_price_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #2b3139;
+                color: white;
+                border: 1px solid #848e9c;
+                padding: 8px;
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(self.lev_price_input)
+        
+        # 수량 입력
+        amount_label = QLabel("수량 (USDT)")
+        amount_label.setStyleSheet("color: white; font-size: 12px;")
+        layout.addWidget(amount_label)
+        
+        self.lev_amount_input = QLineEdit()
+        self.lev_amount_input.setPlaceholderText("100.00")
+        self.lev_amount_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #2b3139;
+                color: white;
+                border: 1px solid #848e9c;
+                padding: 8px;
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(self.lev_amount_input)
+        
+        # 롱/숏 버튼
+        button_layout = QHBoxLayout()
+        
+        long_btn = QPushButton("🚀 롱 오픈")
+        long_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0ecb81;
+                color: white;
+                border: none;
+                padding: 12px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #00a85a;
+            }
+        """)
+        
+        short_btn = QPushButton("📉 숏 오픈")
+        short_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f6465d;
+                color: white;
+                border: none;
+                padding: 12px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #d33f4a;
+            }
+        """)
+        
+        button_layout.addWidget(long_btn)
+        button_layout.addWidget(short_btn)
+        layout.addLayout(button_layout)
+        
+        long_btn.clicked.connect(self.binance_leverage_long)
+        short_btn.clicked.connect(self.binance_leverage_short)
+        
+        layout.addStretch()
+        return tab
+
+    def create_trading_bot_tab(self):
+        """트레이딩봇 컨트롤 탭"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(15)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        # 봇 상태 표시
+        status_section = QVBoxLayout()
+        
+        status_label = QLabel("🤖 트레이딩봇 상태")
+        status_label.setStyleSheet("color: white; font-size: 14px; font-weight: bold;")
+        status_section.addWidget(status_label)
+        
+        self.bot_status_label = QLabel("중지됨 ⭕")
+        self.bot_status_label.setStyleSheet("""
+            QLabel {
+                background-color: #2b3139;
+                color: #f6465d;
+                padding: 8px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+        """)
+        status_section.addWidget(self.bot_status_label)
+        layout.addLayout(status_section)
+        
+        # 전략 선택
+        strategy_section = QVBoxLayout()
+        
+        strategy_label = QLabel("거래 전략")
+        strategy_label.setStyleSheet("color: white; font-size: 12px;")
+        strategy_section.addWidget(strategy_label)
+        
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItems(["macd_final", "rsi_bollinger", "ma_cross", "momentum"])
+        self.strategy_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #2b3139;
+                color: white;
+                border: 1px solid #848e9c;
+                padding: 8px;
+                border-radius: 4px;
+            }
+        """)
+        strategy_section.addWidget(self.strategy_combo)
+        layout.addLayout(strategy_section)
+        
+        # 레버리지 설정
+        leverage_section = QVBoxLayout()
+        
+        leverage_label = QLabel("레버리지")
+        leverage_label.setStyleSheet("color: white; font-size: 12px;")
+        leverage_section.addWidget(leverage_label)
+        
+        self.bot_leverage_combo = QComboBox()
+        self.bot_leverage_combo.addItems(["1x", "2x", "3x", "5x", "10x", "20x"])
+        self.bot_leverage_combo.setCurrentText("3x")
+        self.bot_leverage_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #2b3139;
+                color: white;
+                border: 1px solid #848e9c;
+                padding: 8px;
+                border-radius: 4px;
+            }
+        """)
+        leverage_section.addWidget(self.bot_leverage_combo)
+        layout.addLayout(leverage_section)
+        
+        # 투자 금액
+        amount_section = QVBoxLayout()
+        
+        amount_label = QLabel("투자 금액 (%)")
+        amount_label.setStyleSheet("color: white; font-size: 12px;")
+        amount_section.addWidget(amount_label)
+        
+        self.bot_amount_input = QLineEdit()
+        self.bot_amount_input.setPlaceholderText("30.0")
+        self.bot_amount_input.setText("30.0")
+        self.bot_amount_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #2b3139;
+                color: white;
+                border: 1px solid #848e9c;
+                padding: 8px;
+                border-radius: 4px;
+            }
+        """)
+        amount_section.addWidget(self.bot_amount_input)
+        layout.addLayout(amount_section)
+        
+        # 손절/익절 설정
+        risk_section = QHBoxLayout()
+        
+        # 손절매
+        stop_loss_layout = QVBoxLayout()
+        stop_loss_label = QLabel("손절매 (%)")
+        stop_loss_label.setStyleSheet("color: white; font-size: 10px;")
+        stop_loss_layout.addWidget(stop_loss_label)
+        
+        self.stop_loss_input = QLineEdit()
+        self.stop_loss_input.setPlaceholderText("-2.0")
+        self.stop_loss_input.setText("-2.0")
+        self.stop_loss_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #2b3139;
+                color: white;
+                border: 1px solid #848e9c;
+                padding: 6px;
+                border-radius: 4px;
+                font-size: 10px;
+            }
+        """)
+        stop_loss_layout.addWidget(self.stop_loss_input)
+        risk_section.addLayout(stop_loss_layout)
+        
+        # 익절매
+        take_profit_layout = QVBoxLayout()
+        take_profit_label = QLabel("익절매 (%)")
+        take_profit_label.setStyleSheet("color: white; font-size: 10px;")
+        take_profit_layout.addWidget(take_profit_label)
+        
+        self.take_profit_input = QLineEdit()
+        self.take_profit_input.setPlaceholderText("8.0")
+        self.take_profit_input.setText("8.0")
+        self.take_profit_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #2b3139;
+                color: white;
+                border: 1px solid #848e9c;
+                padding: 6px;
+                border-radius: 4px;
+                font-size: 10px;
+            }
+        """)
+        take_profit_layout.addWidget(self.take_profit_input)
+        risk_section.addLayout(take_profit_layout)
+        
+        layout.addLayout(risk_section)
+        
+        # 봇 컨트롤 버튼
+        button_layout = QHBoxLayout()
+        
+        self.start_bot_btn = QPushButton("🚀 봇 시작")
+        self.start_bot_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0ecb81;
+                color: white;
+                border: none;
+                padding: 12px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #00a85a;
+            }
+        """)
+        self.start_bot_btn.clicked.connect(self.start_trading_bot)
+        button_layout.addWidget(self.start_bot_btn)
+        
+        self.stop_bot_btn = QPushButton("⏹️ 봇 중지")
+        self.stop_bot_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f6465d;
+                color: white;
+                border: none;
+                padding: 12px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #d73747;
+            }
+        """)
+        self.stop_bot_btn.clicked.connect(self.stop_trading_bot)
+        self.stop_bot_btn.setEnabled(False)
+        button_layout.addWidget(self.stop_bot_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # 성과 표시
+        performance_section = QVBoxLayout()
+        
+        perf_label = QLabel("📊 성과")
+        perf_label.setStyleSheet("color: white; font-size: 12px; font-weight: bold;")
+        performance_section.addWidget(perf_label)
+        
+        self.bot_performance_label = QLabel("거래: 0건 | 승률: 0% | 수익: 0 USDT")
+        self.bot_performance_label.setStyleSheet("""
+            QLabel {
+                background-color: #2b3139;
+                color: #fcd535;
+                padding: 8px;
+                border-radius: 4px;
+                font-size: 10px;
+            }
+        """)
+        performance_section.addWidget(self.bot_performance_label)
+        layout.addLayout(performance_section)
+        
+        layout.addStretch()
+        return tab
+
+    def apply_binance_exchange_theme(self):
+        """바이낸스 거래소 스타일 테마 적용"""
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #0b0e11;
+                color: white;
+            }
+            QLabel {
+                color: white;
+            }
+            QComboBox {
+                background-color: #2b3139;
+                color: white;
+                border: 1px solid #848e9c;
+                padding: 6px;
+                border-radius: 4px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QLineEdit {
+                background-color: #2b3139;
+                color: white;
+                border: 1px solid #848e9c;
+                padding: 6px;
+                border-radius: 4px;
+            }
+            QTableWidget {
+                background-color: #1e2329;
+                alternate-background-color: #2b3139;
+                color: white;
+                gridline-color: #848e9c;
+                border: none;
+            }
+            QHeaderView::section {
+                background-color: #2b3139;
+                color: white;
+                font-weight: bold;
+                padding: 8px;
+                border: none;
+            }
+        """)
+
+    def binance_spot_buy(self):
+        """바이낸스 스타일 현물 매수"""
+        try:
+            symbol = self.header_symbol_combo.currentText() if hasattr(self, 'header_symbol_combo') else "BTCUSDT"
+            amount_text = self.spot_amount_input.text().strip()
+            
+            if not amount_text:
+                amount = 100.0  # 기본값
+            else:
+                amount = float(amount_text)
+            
+            success, message = self.trading_engine.place_buy_order(symbol=symbol, amount_usd=amount)
+            if success:
+                QMessageBox.information(self, "✅ 매수 성공", message or f"{symbol} ${amount:.2f} 매수 완료")
+                self.spot_amount_input.clear()
+                self.update_portfolio_display()
+                # 거래내역 테이블 새로고침
+                if hasattr(self, 'load_spot_history'):
+                    self.load_spot_history()
+            else:
+                QMessageBox.warning(self, "❌ 매수 실패", message or "매수 주문이 실패했습니다.")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"매수 중 오류가 발생했습니다:\n{e}")
+
+    def binance_spot_sell(self):
+        """바이낸스 스타일 현물 매도"""
+        try:
+            symbol = self.header_symbol_combo.currentText() if hasattr(self, 'header_symbol_combo') else "BTCUSDT"
+            amount_text = self.spot_amount_input.text().strip()
+            
+            if not amount_text:
+                success, message = self.trading_engine.place_sell_order(symbol=symbol, sell_all=True)
+            else:
+                current_price = self.trading_engine.get_current_price(symbol)
+                if not current_price:
+                    QMessageBox.warning(self, "가격 오류", f"{symbol} 가격을 가져올 수 없습니다.")
+                    return
+                quantity = float(amount_text) / current_price
+                success, message = self.trading_engine.place_sell_order(symbol=symbol, quantity=quantity)
+            
+            if success:
+                QMessageBox.information(self, "✅ 매도 성공", message or f"{symbol} 매도 완료")
+                self.spot_amount_input.clear()
+                self.update_portfolio_display()
+                # 거래내역 테이블 새로고침
+                if hasattr(self, 'load_spot_history'):
+                    self.load_spot_history()
+            else:
+                QMessageBox.warning(self, "❌ 매도 실패", message or "매도 주문이 실패했습니다.")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"매도 중 오류가 발생했습니다:\n{e}")
+
+    def binance_leverage_long(self):
+        """바이낸스 테스트넷 레버리지 롱 포지션"""
+        try:
+            symbol = self.header_symbol_combo.currentText() if hasattr(self, 'header_symbol_combo') else "BTCUSDT"
+            amount_text = self.lev_amount_input.text().strip()
+            leverage_text = self.leverage_combo.currentText().replace('x', '')
+            
+            # 수량 입력 필수 체크
+            if not amount_text:
+                QMessageBox.warning(self, "⚠️ 입력 오류", "거래 수량을 입력해주세요!")
+                return
+                
+            try:
+                amount = float(amount_text)
+                if amount <= 0:
+                    QMessageBox.warning(self, "⚠️ 입력 오류", "거래 수량은 0보다 커야 합니다!")
+                    return
+            except ValueError:
+                QMessageBox.warning(self, "⚠️ 입력 오류", "올바른 숫자를 입력해주세요!")
+                return
+                
+            leverage = int(leverage_text)
+            
+            current_price = self.current_prices.get(symbol, 0)
+            if not current_price:
+                QMessageBox.warning(self, "가격 오류", f"{symbol} 가격을 가져올 수 없습니다.")
+                return
+                
+            # 실제 바이낸스 테스트넷 선물 거래
+            notional_value = amount * leverage
+            quantity = notional_value / current_price
+            
+            success, result = self.futures_client.create_futures_order(
+                symbol=symbol,
+                side='BUY',
+                quantity=quantity,
+                order_type='MARKET',
+                leverage=leverage
+            )
+            
+            if success:
+                order_id = result.get('orderId', 'N/A')
+                QMessageBox.information(self, "🚀 바이낸스 테스트넷 롱 성공", 
+                                      f"✅ 바이낸스 테스트넷 선물 거래 성공!\n\n"
+                                      f"📋 주문 ID: {order_id}\n"
+                                      f"💰 심볼: {symbol}\n"
+                                      f"📊 수량: {quantity:.6f}\n"
+                                      f"💵 가격: ${current_price:,.2f}\n"
+                                      f"🔥 레버리지: {leverage}x\n"
+                                      f"💎 총 거래금액: ${notional_value:,.2f}")
+                self.lev_amount_input.clear()
+                
+                # 레버리지 포지션 테이블 업데이트
+                if hasattr(self, 'refresh_leverage_positions'):
+                    self.refresh_leverage_positions()
+            else:
+                error_msg = result.get('msg', '알 수 없는 오류') if isinstance(result, dict) else str(result)
+                QMessageBox.warning(self, "⚠️ 바이낸스 거래 실패", f"선물 거래 실패:\n{error_msg}")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "🚨 거래 오류", f"바이낸스 테스트넷 선물 거래 중 오류:\n{e}")
+
+    def binance_leverage_short(self):
+        """바이낸스 테스트넷 레버리지 숏 포지션"""
+        try:
+            symbol = self.header_symbol_combo.currentText() if hasattr(self, 'header_symbol_combo') else "BTCUSDT"
+            amount_text = self.lev_amount_input.text().strip()
+            leverage_text = self.leverage_combo.currentText().replace('x', '')
+            
+            # 수량 입력 필수 체크
+            if not amount_text:
+                QMessageBox.warning(self, "⚠️ 입력 오류", "거래 수량을 입력해주세요!")
+                return
+                
+            try:
+                amount = float(amount_text)
+                if amount <= 0:
+                    QMessageBox.warning(self, "⚠️ 입력 오류", "거래 수량은 0보다 커야 합니다!")
+                    return
+            except ValueError:
+                QMessageBox.warning(self, "⚠️ 입력 오류", "올바른 숫자를 입력해주세요!")
+                return
+                
+            leverage = int(leverage_text)
+            
+            current_price = self.current_prices.get(symbol, 0)
+            if not current_price:
+                QMessageBox.warning(self, "가격 오류", f"{symbol} 가격을 가져올 수 없습니다.")
+                return
+                
+            # 실제 바이낸스 테스트넷 선물 거래
+            notional_value = amount * leverage
+            quantity = notional_value / current_price
+            
+            success, result = self.futures_client.create_futures_order(
+                symbol=symbol,
+                side='SELL',
+                quantity=quantity,
+                order_type='MARKET',
+                leverage=leverage
+            )
+            
+            if success:
+                order_id = result.get('orderId', 'N/A')
+                QMessageBox.information(self, "📉 바이낸스 테스트넷 숏 성공", 
+                                      f"✅ 바이낸스 테스트넷 선물 거래 성공!\n\n"
+                                      f"📋 주문 ID: {order_id}\n"
+                                      f"💰 심볼: {symbol}\n"
+                                      f"📊 수량: {quantity:.6f}\n"
+                                      f"💵 가격: ${current_price:,.2f}\n"
+                                      f"🔥 레버리지: {leverage}x\n"
+                                      f"💎 총 거래금액: ${notional_value:,.2f}")
+                self.lev_amount_input.clear()
+                
+                # 레버리지 포지션 테이블 업데이트
+                if hasattr(self, 'refresh_leverage_positions'):
+                    self.refresh_leverage_positions()
+            else:
+                error_msg = result.get('msg', '알 수 없는 오류') if isinstance(result, dict) else str(result)
+                QMessageBox.warning(self, "⚠️ 바이낸스 거래 실패", f"선물 거래 실패:\n{error_msg}")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "🚨 거래 오류", f"바이낸스 테스트넷 선물 거래 중 오류:\n{e}")
+
+    def load_spot_history(self):
+        """현물 보유내역 로드"""
+        try:
+            import json
+            
+            # portfolio.json에서 보유 코인 정보 가져오기
+            with open('data/portfolio.json', 'r') as f:
+                portfolio = json.load(f)
+            
+            holdings = portfolio.get('holdings', {})
+            
+            # 거래내역에서 평균 구매가 계산
+            with open('data/transactions.json', 'r') as f:
+                transactions = json.load(f)
+            
+            # 각 코인별 평균 구매가 계산
+            coin_purchase_info = {}
+            for tx in transactions:
+                if tx.get('type') == 'BUY':
+                    symbol = tx.get('symbol', '').replace('USDT', '')
+                    quantity = tx.get('quantity', 0)
+                    price = tx.get('price', 0)
+                    total_amount = tx.get('total_amount', 0)
+                    
+                    if symbol not in coin_purchase_info:
+                        coin_purchase_info[symbol] = {
+                            'total_quantity': 0,
+                            'total_spent': 0
+                        }
+                    
+                    coin_purchase_info[symbol]['total_quantity'] += quantity
+                    coin_purchase_info[symbol]['total_spent'] += total_amount
+            
+            # 보유 중인 코인들만 테이블에 표시
+            active_holdings = [(coin, amount) for coin, amount in holdings.items() if amount > 0.001]
+            
+            self.spot_history_table.setRowCount(len(active_holdings))
+            
+            for i, (coin, quantity) in enumerate(active_holdings):
+                # 코인 이름
+                self.spot_history_table.setItem(i, 0, QTableWidgetItem(coin))
+                
+                # 수량
+                self.spot_history_table.setItem(i, 1, QTableWidgetItem(f"{quantity:.6f}"))
+                
+                # 평균 구매가 계산
+                if coin in coin_purchase_info:
+                    total_spent = coin_purchase_info[coin]['total_spent']
+                    total_quantity = coin_purchase_info[coin]['total_quantity']
+                    avg_purchase_price = total_spent / total_quantity if total_quantity > 0 else 0
+                else:
+                    avg_purchase_price = 0
+                
+                self.spot_history_table.setItem(i, 2, QTableWidgetItem(f"${avg_purchase_price:,.2f}"))
+                
+                # 현재가
+                symbol = f"{coin}USDT"
+                current_price = self.current_prices.get(symbol, 0)
+                if current_price > 0:
+                    self.spot_history_table.setItem(i, 3, QTableWidgetItem(f"${current_price:,.2f}"))
+                    
+                    # 손익 계산
+                    if avg_purchase_price > 0:
+                        current_value = current_price * quantity
+                        purchase_value = avg_purchase_price * quantity
+                        pnl = current_value - purchase_value
+                        pnl_percent = ((current_price - avg_purchase_price) / avg_purchase_price) * 100
+                        
+                        pnl_text = f"${pnl:+,.2f} ({pnl_percent:+.1f}%)"
+                        pnl_item = QTableWidgetItem(pnl_text)
+                        
+                        # 손익에 따른 색상 설정
+                        if pnl > 0:
+                            pnl_item.setForeground(QColor('#0ecb81'))  # 초록색
+                        elif pnl < 0:
+                            pnl_item.setForeground(QColor('#f6465d'))  # 빨간색
+                        else:
+                            pnl_item.setForeground(QColor('#848e9c'))  # 회색
+                            
+                        self.spot_history_table.setItem(i, 4, pnl_item)
+                    else:
+                        self.spot_history_table.setItem(i, 4, QTableWidgetItem("--"))
+                else:
+                    self.spot_history_table.setItem(i, 3, QTableWidgetItem("--"))
+                    self.spot_history_table.setItem(i, 4, QTableWidgetItem("--"))
+                    
+        except Exception as e:
+            print(f"보유내역 로드 오류: {e}")
+            # 오류 발생 시 빈 테이블 표시
+            if hasattr(self, 'spot_history_table'):
+                self.spot_history_table.setRowCount(0)
+    
+    def update_trading_history_pnl(self):
+        """보유내역의 실시간 P&L 업데이트"""
+        try:
+            if not hasattr(self, 'spot_history_table') or self.spot_history_table.rowCount() == 0:
+                return
+                
+            for row in range(self.spot_history_table.rowCount()):
+                # 코인 심볼 가져오기 (새로운 구조에서는 0번 컬럼)
+                coin_item = self.spot_history_table.item(row, 0)
+                if not coin_item:
+                    continue
+                    
+                coin = coin_item.text()
+                symbol = f"{coin}USDT"
+                
+                # 구매가 가져오기 (새로운 구조에서는 2번 컬럼)
+                purchase_price_item = self.spot_history_table.item(row, 2)
+                if not purchase_price_item or purchase_price_item.text() == "--":
+                    continue
+                    
+                try:
+                    purchase_price = float(purchase_price_item.text().replace('$', '').replace(',', ''))
+                except:
+                    continue
+                
+                # 수량 가져오기 (새로운 구조에서는 1번 컬럼)
+                quantity_item = self.spot_history_table.item(row, 1)
+                if not quantity_item:
+                    continue
+                    
+                try:
+                    quantity = float(quantity_item.text())
+                except:
+                    continue
+                
+                # 현재가 업데이트
+                current_price = self.current_prices.get(symbol, 0)
+                if current_price > 0:
+                    # 현재가 표시 (3번 컬럼)
+                    current_price_item = QTableWidgetItem(f"${current_price:,.2f}")
+                    self.spot_history_table.setItem(row, 3, current_price_item)
+                    
+                    # 손익 계산
+                    if purchase_price > 0:
+                        current_value = current_price * quantity
+                        purchase_value = purchase_price * quantity
+                        pnl = current_value - purchase_value
+                        pnl_percent = ((current_price - purchase_price) / purchase_price) * 100
+                        
+                        pnl_text = f"${pnl:+,.2f} ({pnl_percent:+.1f}%)"
+                        pnl_item = QTableWidgetItem(pnl_text)
+                        
+                        # 손익에 따른 색상 설정
+                        if pnl > 0:
+                            pnl_item.setForeground(QColor('#0ecb81'))  # 초록색
+                        elif pnl < 0:
+                            pnl_item.setForeground(QColor('#f6465d'))  # 빨간색
+                        else:
+                            pnl_item.setForeground(QColor('#848e9c'))  # 회색
+                            
+                        self.spot_history_table.setItem(row, 4, pnl_item)
+                    else:
+                        self.spot_history_table.setItem(row, 4, QTableWidgetItem("--"))
+                else:
+                    # 현재가를 가져올 수 없는 경우
+                    self.spot_history_table.setItem(row, 3, QTableWidgetItem("--"))
+                    self.spot_history_table.setItem(row, 4, QTableWidgetItem("--"))
+                    
+        except Exception as e:
+            print(f"보유내역 P&L 업데이트 오류: {e}")
+    
+    def update_leverage_positions_pnl(self):
+        """레버리지 포지션의 실시간 P&L 업데이트"""
+        try:
+            if not hasattr(self, 'leverage_history_table') or self.leverage_history_table.rowCount() == 0:
+                return
+                
+            for row in range(self.leverage_history_table.rowCount()):
+                # 심볼 가져오기 (0번 콜럼)
+                symbol_item = self.leverage_history_table.item(row, 0)
+                if not symbol_item:
+                    continue
+                    
+                symbol = symbol_item.text()
+                
+                # 방향 가져오기 (1번 콜럼)
+                side_item = self.leverage_history_table.item(row, 1)
+                if not side_item:
+                    continue
+                side = side_item.text()
+                
+                # 진입가 가져오기 (3번 콜럼)
+                entry_price_item = self.leverage_history_table.item(row, 3)
+                if not entry_price_item:
+                    continue
+                    
+                try:
+                    entry_price = float(entry_price_item.text().replace('$', '').replace(',', ''))
+                except:
+                    continue
+                
+                # 수량 가져오기 (5번 콜럼)
+                quantity_item = self.leverage_history_table.item(row, 5)
+                if not quantity_item:
+                    continue
+                    
+                try:
+                    quantity = float(quantity_item.text())
+                except:
+                    continue
+                
+                # 현재가 업데이트
+                current_price = self.current_prices.get(symbol, entry_price)
+                
+                # 현재가 표시 (4번 콜럼)
+                current_price_item = QTableWidgetItem(f"${current_price:,.2f}")
+                self.leverage_history_table.setItem(row, 4, current_price_item)
+                
+                # 손익 계산
+                if side.upper() == 'LONG':
+                    pnl_usdt = (current_price - entry_price) * quantity
+                    pnl_percent = ((current_price - entry_price) / entry_price) * 100
+                else:  # SHORT
+                    pnl_usdt = (entry_price - current_price) * quantity
+                    pnl_percent = ((entry_price - current_price) / entry_price) * 100
+                
+                # 손익 표시 (6번 콜럼)
+                pnl_item = QTableWidgetItem(f"${pnl_usdt:+,.2f}")
+                if pnl_usdt >= 0:
+                    pnl_item.setForeground(QColor("#0ecb81"))  # 초록
+                else:
+                    pnl_item.setForeground(QColor("#f6465d"))  # 빨간
+                self.leverage_history_table.setItem(row, 6, pnl_item)
+                
+                # 손익률 표시 (7번 콜럼)
+                pnl_percent_item = QTableWidgetItem(f"{pnl_percent:+.2f}%")
+                if pnl_percent >= 0:
+                    pnl_percent_item.setForeground(QColor("#0ecb81"))
+                else:
+                    pnl_percent_item.setForeground(QColor("#f6465d"))
+                self.leverage_history_table.setItem(row, 7, pnl_percent_item)
+                
+        except Exception as e:
+            print(f"레버리지 포지션 P&L 업데이트 오류: {e}")
+
+    def load_leverage_history(self):
+        """바이낸스 테스트넷 선물 포지션 및 거래내역 로드 (기존 호환성용)"""
+        # 새로운 refresh_leverage_positions 함수로 대체
+        if hasattr(self, 'refresh_leverage_positions'):
+            self.refresh_leverage_positions()
+            return
+        
+        # 기존 호환성을 위한 빈 함수
+        print("레버리지 보유현황은 새로운 refresh_leverage_positions 함수를 사용합니다.")
+
     def create_menu_bar(self):
         """메뉴바 생성"""
         menubar = self.menuBar()
@@ -974,20 +3030,32 @@ class TradingGUI(QMainWindow):
         help_menu.addAction('정보', self.show_about)
 
     def init_price_thread(self):
-        """가격 업데이트 스레드 초기화"""
+        """최적화된 가격 업데이트 스레드 초기화"""
         self.price_thread = PriceUpdateThread(self.trading_engine)
-        self.price_thread.price_updated.connect(self.update_prices)
+        self.price_thread.price_updated.connect(self.update_prices_batch)
         self.price_thread.start()
+        
+        # 트레이딩봇 성과 업데이트 타이머 (15초마다 - 최적화)
+        self.bot_performance_timer = QTimer()
+        self.bot_performance_timer.timeout.connect(self.update_bot_performance)
+        self.bot_performance_timer.start(15000)  # 15초로 증가
 
     def on_main_symbol_changed(self, symbol):
         """메인 심볼 변경 시 호출"""
+        print(f"🔥🔥🔥 [메인 심볼 변경 함수 호출됨] {symbol} 🔥🔥🔥")
+        print(f"[DEBUG] order_book_widget 존재 여부: {hasattr(self, 'order_book_widget')}")
+        print(f"[DEBUG] ORDER_BOOK_AVAILABLE: {ORDER_BOOK_AVAILABLE}")
+        
+        # header_symbol_combo만 사용하므로 동기화 코드 제거
+        
         # 코인 아이콘 변경
         coin_icons = {
             "BTCUSDT": "₿", "ETHUSDT": "Ξ", "BNBUSDT": "🅱",
             "ADAUSDT": "₳", "SOLUSDT": "◎", "XRPUSDT": "✕",
             "DOTUSDT": "●", "AVAXUSDT": "🔺", "MATICUSDT": "🔷", "LINKUSDT": "🔗"
         }
-        self.coin_icon.setText(coin_icons.get(symbol, "🪙"))
+        if hasattr(self, 'coin_icon'):
+            self.coin_icon.setText(coin_icons.get(symbol, "🪙"))
 
         # 코인별 색상 변경
         coin_colors = {
@@ -996,74 +3064,186 @@ class TradingGUI(QMainWindow):
             "DOTUSDT": "#e6007a", "AVAXUSDT": "#e84142", "MATICUSDT": "#8247e5", "LINKUSDT": "#375bd2"
         }
         color = coin_colors.get(symbol, "#f0b90b")
-        self.coin_icon.setStyleSheet(f"font-size: 24px; color: {color}; font-weight: bold;")
+        if hasattr(self, 'coin_icon'):
+            self.coin_icon.setStyleSheet(f"font-size: 24px; color: {color}; font-weight: bold;")
 
-        # 차트도 함께 변경
-        if hasattr(self.chart_widget, 'symbol_combo'):
-            self.chart_widget.symbol_combo.setCurrentText(symbol)
+        # 상단 심볼 라벨 업데이트
+        if hasattr(self, 'symbol_label'):
+            print(f"[심볼 라벨 업데이트] {symbol}")
+            self.symbol_label.setText(symbol)
 
-        # 🚀 호가창도 함께 변경
-        if hasattr(self, 'order_book_widget'):
-            self.order_book_widget.set_symbol(symbol)
+        # 차트 업데이트
+        if hasattr(self, 'chart_widget'):
+            try:
+                print(f"📈📈📈 [차트 업데이트 시도] {symbol} 📈📈📈")
+                self.chart_widget.set_symbol(symbol)
+                print(f"📈📈📈 [차트 업데이트 완료] {symbol} 📈📈📈")
+            except Exception as e:
+                print(f"❌❌❌ [차트 업데이트 오류] {symbol}: {e} ❌❌❌")
 
-        # 가격 업데이트
+        # 호가창 업데이트
+        if hasattr(self, 'order_book_widget') and ORDER_BOOK_AVAILABLE:
+            try:
+                print(f"💎💎💎 [호가창 업데이트 시도] {symbol} 💎💎💎")
+                # 호가창이 완전히 로드되었는지 확인
+                if self.order_book_widget and hasattr(self.order_book_widget, 'set_symbol'):
+                    self.order_book_widget.set_symbol(symbol)
+                    print(f"💎💎💎 [호가창 업데이트 완료] {symbol} 💎💎💎")
+                else:
+                    print(f"⚠️ 호가창이 아직 준비되지 않음")
+            except Exception as e:
+                print(f"❌❌❌ [호가창 업데이트 오류] {symbol}: {e} ❌❌❌")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"❌❌❌ [호가창 업데이트 실패] hasattr: {hasattr(self, 'order_book_widget')}, AVAILABLE: {ORDER_BOOK_AVAILABLE} ❌❌❌")
+
+        # 가격 업데이트 (바이낸스 스타일)
         if symbol in self.current_prices:
             price = self.current_prices[symbol]
-            self.main_price_label.setText(f"${price:,.4f}")
+            if hasattr(self, 'main_price_label'):
+                self.main_price_label.setText(f"${price:,.4f}")
+            # 바이낸스 헤더 가격 업데이트
+            if hasattr(self, 'current_price_label'):
+                self.current_price_label.setText(f"${price:,.4f}")
+                
+        print(f"✅✅✅ [메인 심볼 변경 함수 완료] {symbol} ✅✅✅")
 
     def on_orderbook_price_clicked(self, price):
-        """호가창 가격 클릭 시 호출 - 입력창에 자동 입력 🚀"""
+        """호가창 가격 클릭 시 호출 - 바이낸스 스타일 입력창에 자동 입력 🚀"""
         if not ORDER_BOOK_AVAILABLE:
             return
 
         try:
-            # 선택된 탭에 따라 해당 입력창에 가격 입력
-            price_str = f"{price:.4f}"
+            # 바이낸스 스타일 현물 거래 가격 입력창에 자동 입력
+            if hasattr(self, 'spot_price_input'):
+                self.spot_price_input.setText(f"{price:.4f}")
+                
+            # 레버리지 거래 가격 입력창에도 입력 (있을 경우)
+            if hasattr(self, 'lev_price_input'):
+                self.lev_price_input.setText(f"{price:.4f}")
 
-            # 현재 활성화된 탭의 입력창에 가격 입력
-            # 현물 거래의 경우 USD 금액으로 계산해서 입력
+            # 구형 입력창도 지원 (호환성)
             if hasattr(self, 'quick_buy_input'):
-                # 예시: $100 정도의 금액으로 자동 계산
                 amount = min(100.0, 1000.0 / price)
                 self.quick_buy_input.setText(f"{amount:.2f}")
 
-            # 레버리지 거래의 경우 금액 입력
-            if hasattr(self, 'long_amount_input'):
-                self.long_amount_input.setText("100")  # 기본 $100
-
-            if hasattr(self, 'short_amount_input'):
-                self.short_amount_input.setText("100")  # 기본 $100
-
-            # 상태바에 알림 표시
-            self.statusBar().showMessage(f"📊 호가창 클릭: ${price:.4f} 가격 적용됨", 3000)
-
-            self.logger.info(f"📊 호가창 가격 클릭: ${price:.4f}")
+            print(f"📊 호가창 가격 클릭: ${price:.4f} - 가격 입력창에 자동 설정됨")
 
         except Exception as e:
-            self.logger.error(f"호가창 가격 클릭 처리 오류: {e}")
+            print(f"호가창 가격 클릭 처리 오류: {e}")
+
+    def on_slider_changed(self, value):
+        """자산 비율 슬라이더 변경 시 호출 - 금액과 수량 자동 계산"""
+        try:
+            # 현재 잔고 가져오기
+            summary, _ = self.trading_engine.get_portfolio_status()
+            if summary:
+                total_balance = summary.get('balance', 0)
+                amount = (total_balance * value) / 100
+                
+                # 현재 선택된 심볼과 가격 가져오기
+                current_symbol = self.header_symbol_combo.currentText() if hasattr(self, 'header_symbol_combo') else "BTCUSDT"
+                current_price = self.current_prices.get(current_symbol, 0)
+                
+                # 현물 거래 금액 입력창에 자동 설정
+                if hasattr(self, 'spot_amount_input'):
+                    self.spot_amount_input.setText(f"{amount:.2f}")
+                
+                # 레버리지 거래 금액 입력창에 자동 설정
+                if hasattr(self, 'lev_amount_input'):
+                    self.lev_amount_input.setText(f"{amount:.2f}")
+                
+                # 수량 계산 및 표시
+                if current_price > 0:
+                    quantity = amount / current_price
+                    quantity_text = f" → {quantity:.6f} {current_symbol.replace('USDT', '')}"
+                else:
+                    quantity_text = ""
+                
+                # 슬라이더 값 라벨 업데이트 (수량 정보 포함)
+                self.slider_value_label.setText(f"{value}% (${amount:,.2f}{quantity_text})")
+            else:
+                self.slider_value_label.setText(f"{value}% (약 $0)")
+                
+        except Exception as e:
+            print(f"슬라이더 변경 처리 오류: {e}")
+
+    def on_symbol_changed(self, new_symbol):
+        """심볼 변경 시 차트와 호가창 업데이트"""
+        try:
+            print(f"심볼 변경: {new_symbol}")
+            
+            # 차트 업데이트
+            if hasattr(self, 'chart_widget'):
+                print(f"차트 위젯 업데이트: {new_symbol}")
+                self.chart_widget.set_symbol(new_symbol)
+                
+            # 호가창 업데이트  
+            if hasattr(self, 'order_book_widget') and ORDER_BOOK_AVAILABLE:
+                print(f"호가창 위젯 업데이트: {new_symbol}")
+                self.order_book_widget.set_symbol(new_symbol)
+            else:
+                print(f"호가창 업데이트 실패 - hasattr: {hasattr(self, 'order_book_widget')}, AVAILABLE: {ORDER_BOOK_AVAILABLE}")
+                
+            # 헤더의 심볼 라벨 업데이트
+            if hasattr(self, 'symbol_label'):
+                self.symbol_label.setText(new_symbol)
+                
+            # 현재 가격 업데이트
+            if new_symbol in self.current_prices:
+                price = self.current_prices[new_symbol]
+                if hasattr(self, 'current_price_label'):
+                    self.current_price_label.setText(f"${price:,.4f}")
+                    
+            print(f"✅ 심볼 변경 완료: {new_symbol}")
+            
+        except Exception as e:
+            print(f"심볼 변경 처리 오류: {e}")
 
     def update_prices(self, prices):
         """가격 업데이트 - 바이낸스 스타일"""
         self.current_prices = prices
-        current_symbol = self.main_symbol_combo.currentText()
+        current_symbol = self.header_symbol_combo.currentText() if hasattr(self, 'header_symbol_combo') else "BTCUSDT"
 
         if current_symbol in prices:
             price = prices[current_symbol]
-            self.main_price_label.setText(f"${price:,.4f}")
+            # 기존 스타일 레이블 업데이트
+            if hasattr(self, 'main_price_label'):
+                self.main_price_label.setText(f"${price:,.4f}")
+            # 바이낸스 헤더 가격 업데이트
+            if hasattr(self, 'current_price_label'):
+                self.current_price_label.setText(f"${price:,.4f}")
 
             # 임시로 변동률 계산 (실제로는 24시간 데이터 필요)
             change = 85.99  # 예시 값
             change_pct = 0.07  # 예시 값
 
-            if change >= 0:
-                self.price_change_label.setText(f"+${change:.2f} (+{change_pct:.2f}%)")
-                self.price_change_label.setStyleSheet("font-size: 16px; color: #0ecb81; margin-left: 10px;")
-            else:
-                self.price_change_label.setText(f"${change:.2f} ({change_pct:.2f}%)")
-                self.price_change_label.setStyleSheet("font-size: 16px; color: #f6465d; margin-left: 10px;")
+            if hasattr(self, 'price_change_label'):
+                if change >= 0:
+                    self.price_change_label.setText(f"+${change:.2f} (+{change_pct:.2f}%)")
+                    self.price_change_label.setStyleSheet("font-size: 16px; color: #0ecb81; margin-left: 10px;")
+                else:
+                    self.price_change_label.setText(f"${change:.2f} ({change_pct:.2f}%)")
+                    self.price_change_label.setStyleSheet("font-size: 16px; color: #f6465d; margin-left: 10px;")
 
-        # 포트폴리오 업데이트
-        self.update_portfolio_display()
+        # 최적화: 백그라운드 워커가 포트폴리오 업데이트 처리
+        # 기존 동기 호출을 비동기로 변경
+        if hasattr(self, 'update_manager'):
+            self.update_manager.request_portfolio_update()
+        
+        # 현물 보유내역 P&L 업데이트
+        self.update_trading_history_pnl()
+        
+        # 레버리지 포지션 P&L 업데이트  
+        self.update_leverage_positions_pnl()
+        
+        # 현물 및 레버리지 포지션 실시간 P&L 업데이트
+        # 현물 보유내역 P&L 업데이트  
+        self.update_trading_history_pnl()
+        
+        # 레버리지 포지션 P&L 업데이트
+        self.update_leverage_positions_pnl()
 
         # 🤖 봇 상태 업데이트
         if hasattr(self, 'advanced_bot') and self.advanced_bot:
@@ -1123,7 +3303,17 @@ class TradingGUI(QMainWindow):
         self.statusBar().showMessage(status_msg)
 
     def update_portfolio_display(self):
-        """포트폴리오 디스플레이 업데이트 - 현물 + 실제 바이낸스 레버리지"""
+        """레거시 포트폴리오 디스플레이 업데이트 (호환성용)"""
+        # 백그라운드 워커가 있으면 사용, 없으면 기존 방식
+        if hasattr(self, 'update_manager') and self.update_manager:
+            self.update_manager.request_portfolio_update()
+            return
+        
+        # 레거시 지원 (기존 코드 유지)
+        self._legacy_update_portfolio_display()
+    
+    def _legacy_update_portfolio_display(self):
+        """기존 포트폴리오 디스플레이 업데이트 (레거시)"""
         # 현물 거래 요약
         summary, message = self.trading_engine.get_portfolio_status()
 
@@ -1150,8 +3340,8 @@ class TradingGUI(QMainWindow):
             futures_value = futures_balance['balance'] + total_futures_pnl
             total_combined_value = spot_value + futures_value
 
-            # 헤더에 총합 정보 업데이트
-            self.total_value_label.setText(f"총 자산: ${total_combined_value:,.2f}")
+            # 바이낸스 헤더 잔고 정보 업데이트
+            self.balance_label.setText(f"잔고: ${total_combined_value:,.2f}")
 
             # 현물 손익
             spot_profit_loss = summary['profit_loss']
@@ -1172,23 +3362,28 @@ class TradingGUI(QMainWindow):
                 color = "#f6465d"  # 빨간색
                 sign = ""
 
-            self.profit_loss_label.setText(
-                f"총 손익: {sign}${total_profit_loss:.2f} ({sign}{total_profit_loss_percent:.2f}%) "
-                f"[현물: {'+' if spot_profit_loss >= 0 else ''}${spot_profit_loss:.2f} | "
-                f"선물: {'+' if futures_profit_loss >= 0 else ''}${futures_profit_loss:.2f}]"
-            )
-            self.profit_loss_label.setStyleSheet(f"font-size: 12px; color: {color};")
+            # 기존 스타일에서만 profit_loss_label 업데이트
+            if hasattr(self, 'profit_loss_label'):
+                self.profit_loss_label.setText(
+                    f"총 손익: {sign}${total_profit_loss:.2f} ({sign}{total_profit_loss_percent:.2f}%) "
+                    f"[현물: {'+' if spot_profit_loss >= 0 else ''}${spot_profit_loss:.2f} | "
+                    f"선물: {'+' if futures_profit_loss >= 0 else ''}${futures_profit_loss:.2f}]"
+                )
+                self.profit_loss_label.setStyleSheet(f"font-size: 12px; color: {color};")
 
-            # 바이낸스 포지션 수 표시 (있는 경우)
-            if active_positions:
-                position_info = f" | 🚀 바이낸스 포지션: {len(active_positions)}개"
-                current_text = self.profit_loss_label.text()
-                self.profit_loss_label.setText(current_text + position_info)
+                # 바이낸스 포지션 수 표시 (있는 경우)
+                if active_positions:
+                    position_info = f" | 🚀 바이낸스 포지션: {len(active_positions)}개"
+                    current_text = self.profit_loss_label.text()
+                    self.profit_loss_label.setText(current_text + position_info)
 
     def execute_quick_buy(self):
         """빠른 매수 실행"""
-        symbol = self.main_symbol_combo.currentText()
-        amount_text = self.quick_buy_input.text().strip()
+        symbol = self.header_symbol_combo.currentText() if hasattr(self, 'header_symbol_combo') else "BTCUSDT"
+        if hasattr(self, 'quick_buy_input'):
+            amount_text = self.quick_buy_input.text().strip()
+        else:
+            amount_text = "100"  # 기본값
 
         if not amount_text:
             QMessageBox.warning(self, "입력 오류", "매수 금액을 입력해주세요.")
@@ -1200,7 +3395,8 @@ class TradingGUI(QMainWindow):
 
             if success:
                 QMessageBox.information(self, "✅ 매수 성공", message)
-                self.quick_buy_input.clear()
+                if hasattr(self, 'quick_buy_input'):
+                    self.quick_buy_input.clear()
                 self.update_portfolio_display()
             else:
                 QMessageBox.warning(self, "❌ 매수 실패", message)
@@ -1210,8 +3406,11 @@ class TradingGUI(QMainWindow):
 
     def execute_quick_sell(self):
         """빠른 매도 실행"""
-        symbol = self.main_symbol_combo.currentText()
-        percentage_text = self.quick_sell_input.text().strip()
+        symbol = self.header_symbol_combo.currentText() if hasattr(self, 'header_symbol_combo') else "BTCUSDT"
+        if hasattr(self, 'quick_sell_input'):
+            percentage_text = self.quick_sell_input.text().strip()
+        else:
+            percentage_text = "100"  # 기본값 100%
 
         if not percentage_text:
             QMessageBox.warning(self, "입력 오류", "매도 비율을 입력해주세요.")
@@ -1762,11 +3961,19 @@ class TradingGUI(QMainWindow):
             return
 
         try:
-            symbol = self.bot_symbol_combo.currentText()
-            strategy = self.bot_strategy_combo.currentText()
-            amount_text = self.bot_amount_input.text().strip()
-            leverage_text = self.bot_leverage_combo.currentText().replace('x', '')
-            position_text = self.bot_position_input.text().strip()
+            # 컴팩트 탭과 기본 탭 모두 지원
+            if hasattr(self, 'compact_bot_strategy_combo'):
+                symbol = "SOLUSDT"  # 기본값
+                strategy = self.compact_bot_strategy_combo.currentText()
+                amount_text = self.compact_bot_amount_input.text().strip()
+                leverage_text = "3x"  # 기본값
+                position_text = "30"  # 기본값
+            else:
+                symbol = self.bot_symbol_combo.currentText()
+                strategy = self.bot_strategy_combo.currentText()
+                amount_text = self.bot_amount_input.text().strip()
+                leverage_text = self.bot_leverage_combo.currentText().replace('x', '')
+                position_text = self.bot_position_input.text().strip()
 
             if not amount_text:
                 QMessageBox.warning(self, "입력 오류", "거래 금액을 입력해주세요.")
@@ -1804,12 +4011,16 @@ class TradingGUI(QMainWindow):
             self.advanced_bot = AdvancedTradingBot(bot_config)
 
             # GUI 업데이트
-            self.start_bot_btn.setEnabled(False)
-            self.stop_bot_btn.setEnabled(True)
-            self.bot_status_label.setText("시작 중...")
-            self.bot_status_label.setStyleSheet("font-size: 12px; color: #f0b90b;")
-            self.bot_strategy_label.setText(f"전략: {strategy}")
-            self.bot_strategy_label.setStyleSheet("font-size: 11px; color: #00ff88;")
+            if hasattr(self, 'start_bot_btn'):
+                self.start_bot_btn.setEnabled(False)
+            if hasattr(self, 'stop_bot_btn'):
+                self.stop_bot_btn.setEnabled(True)
+            if hasattr(self, 'bot_status_label'):
+                self.bot_status_label.setText("시작 중...")
+                self.bot_status_label.setStyleSheet("font-size: 12px; color: #f0b90b;")
+            if hasattr(self, 'bot_strategy_label'):
+                self.bot_strategy_label.setText(f"전략: {strategy}")
+                self.bot_strategy_label.setStyleSheet("font-size: 11px; color: #00ff88;")
 
             # 봇 시작 (비동기 처리)
             import asyncio
@@ -1821,16 +4032,21 @@ class TradingGUI(QMainWindow):
                 try:
                     loop.run_until_complete(self.advanced_bot.start())
                     # 성공 시 GUI 업데이트
-                    self.bot_status_label.setText("실행 중")
-                    self.bot_status_label.setStyleSheet("font-size: 12px; color: #00C851;")
+                    if hasattr(self, 'bot_status_label'):
+                        self.bot_status_label.setText("실행 중")
+                        self.bot_status_label.setStyleSheet("font-size: 12px; color: #00C851;")
                 except Exception as e:
                     # 실패 시 GUI 복원
-                    self.start_bot_btn.setEnabled(True)
-                    self.stop_bot_btn.setEnabled(False)
-                    self.bot_status_label.setText("시작 실패")
-                    self.bot_status_label.setStyleSheet("font-size: 12px; color: #f6465d;")
-                    self.bot_strategy_label.setText("전략: 없음")
-                    self.bot_strategy_label.setStyleSheet("font-size: 11px; color: #888;")
+                    if hasattr(self, 'start_bot_btn'):
+                        self.start_bot_btn.setEnabled(True)
+                    if hasattr(self, 'stop_bot_btn'):
+                        self.stop_bot_btn.setEnabled(False)
+                    if hasattr(self, 'bot_status_label'):
+                        self.bot_status_label.setText("시작 실패")
+                        self.bot_status_label.setStyleSheet("font-size: 12px; color: #f6465d;")
+                    if hasattr(self, 'bot_strategy_label'):
+                        self.bot_strategy_label.setText("전략: 없음")
+                        self.bot_strategy_label.setStyleSheet("font-size: 11px; color: #888;")
                     QMessageBox.warning(self, "❌ 봇 시작 실패", f"봇 시작 중 오류:\n{e}")
                     self.advanced_bot = None
                 finally:
@@ -1907,8 +4123,9 @@ class TradingGUI(QMainWindow):
             if not hasattr(self, 'advanced_bot') or not self.advanced_bot:
                 return
 
-            self.bot_status_label.setText("정지 중...")
-            self.bot_status_label.setStyleSheet("font-size: 12px; color: #f0b90b;")
+            if hasattr(self, 'bot_status_label'):
+                self.bot_status_label.setText("정지 중...")
+                self.bot_status_label.setStyleSheet("font-size: 12px; color: #f0b90b;")
 
             # 봇 정지 (비동기 처리)
             import asyncio
@@ -1921,12 +4138,16 @@ class TradingGUI(QMainWindow):
                     loop.run_until_complete(self.advanced_bot.stop())
 
                     # GUI 업데이트
-                    self.start_bot_btn.setEnabled(True)
-                    self.stop_bot_btn.setEnabled(False)
-                    self.bot_status_label.setText("정지됨")
-                    self.bot_status_label.setStyleSheet("font-size: 12px; color: #ff4444;")
-                    self.bot_strategy_label.setText("전략: 없음")
-                    self.bot_strategy_label.setStyleSheet("font-size: 11px; color: #888;")
+                    if hasattr(self, 'start_bot_btn'):
+                        self.start_bot_btn.setEnabled(True)
+                    if hasattr(self, 'stop_bot_btn'):
+                        self.stop_bot_btn.setEnabled(False)
+                    if hasattr(self, 'bot_status_label'):
+                        self.bot_status_label.setText("정지됨")
+                        self.bot_status_label.setStyleSheet("font-size: 12px; color: #ff4444;")
+                    if hasattr(self, 'bot_strategy_label'):
+                        self.bot_strategy_label.setText("전략: 없음")
+                        self.bot_strategy_label.setStyleSheet("font-size: 11px; color: #888;")
 
                     # 성과 표시
                     total_trades = self.advanced_bot.performance_metrics.get('total_trades', 0)
@@ -2214,7 +4435,7 @@ class TradingGUI(QMainWindow):
         leverage_layout = QHBoxLayout()
         leverage_layout.addWidget(QLabel("레버리지:"))
         leverage_combo = QComboBox()
-        leverage_combo.addItems(["5x", "10x", "20x", "50x", "100x"])
+        leverage_combo.addItems(["1x", "2x", "3x", "5x", "10x", "20x", "50x", "75x", "100x", "125x"])
         leverage_combo.setCurrentText("10x")
         leverage_layout.addWidget(leverage_combo)
         layout.addLayout(leverage_layout)
@@ -2239,7 +4460,7 @@ class TradingGUI(QMainWindow):
                 amount = float(amount_input.text())
                 leverage = int(leverage_combo.currentText().replace('x', ''))
 
-                symbol = self.main_symbol_combo.currentText()
+                symbol = self.header_symbol_combo.currentText() if hasattr(self, 'header_symbol_combo') else "BTCUSDT"
                 current_price = self.current_prices.get(symbol, 0)
 
                 if current_price <= 0:
@@ -2306,7 +4527,7 @@ class TradingGUI(QMainWindow):
         leverage_layout = QHBoxLayout()
         leverage_layout.addWidget(QLabel("레버리지:"))
         leverage_combo = QComboBox()
-        leverage_combo.addItems(["5x", "10x", "20x", "50x", "100x"])
+        leverage_combo.addItems(["1x", "2x", "3x", "5x", "10x", "20x", "50x", "75x", "100x", "125x"])
         leverage_combo.setCurrentText("10x")
         leverage_layout.addWidget(leverage_combo)
         layout.addLayout(leverage_layout)
@@ -2331,7 +4552,7 @@ class TradingGUI(QMainWindow):
                 amount = float(amount_input.text())
                 leverage = int(leverage_combo.currentText().replace('x', ''))
 
-                symbol = self.main_symbol_combo.currentText()
+                symbol = self.header_symbol_combo.currentText() if hasattr(self, 'header_symbol_combo') else "BTCUSDT"
                 current_price = self.current_prices.get(symbol, 0)
 
                 if current_price <= 0:
@@ -2648,6 +4869,140 @@ class TradingGUI(QMainWindow):
         self.logger.info("🏁 Genius Coin Manager (바이낸스 테스트넷 + 트레이딩봇) 종료")
         event.accept()
 
+    def start_trading_bot(self):
+        """트레이딩봇 시작"""
+        try:
+            if not ADVANCED_BOT_AVAILABLE:
+                QMessageBox.warning(self, "봇 모듈 오류", 
+                                    "트레이딩봇 모듈을 찾을 수 없습니다.\n"
+                                    "trading_bot_integration.py와 strategy_adapter.py 파일을 확인하세요.")
+                return
+            
+            # 설정 값 가져오기
+            symbol = self.header_symbol_combo.currentText() if hasattr(self, 'header_symbol_combo') else "BTCUSDT"
+            strategy = self.strategy_combo.currentText()
+            leverage = int(self.bot_leverage_combo.currentText().replace('x', ''))
+            position_size = float(self.bot_amount_input.text() or "30.0")
+            stop_loss = float(self.stop_loss_input.text() or "-2.0")
+            take_profit = float(self.take_profit_input.text() or "8.0")
+            
+            # 봇 설정 생성
+            bot_config = TradingBotConfig(
+                symbol=symbol,
+                timeframe="1h",
+                strategy_name=strategy,
+                leverage=leverage,
+                position_size_pct=position_size,
+                stop_loss_pct=stop_loss,
+                take_profit_pct=take_profit,
+                max_positions=2
+            )
+            
+            # 기존 봇이 있다면 중지
+            if self.advanced_bot and hasattr(self.advanced_bot, 'is_running') and self.advanced_bot.is_running:
+                self.stop_trading_bot()
+            
+            # 새 봇 시작
+            self.advanced_bot = AdvancedTradingBot(bot_config)
+            
+            # 비동기 실행을 위한 스레드 시작
+            import threading
+            def run_bot():
+                import asyncio
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self.advanced_bot.start())
+                except Exception as e:
+                    print(f"봇 실행 오류: {e}")
+                finally:
+                    loop.close()
+            
+            self.bot_thread = threading.Thread(target=run_bot, daemon=True)
+            self.bot_thread.start()
+            
+            # UI 업데이트
+            self.bot_status_label.setText("실행 중 🟢")
+            self.bot_status_label.setStyleSheet("""
+                QLabel {
+                    background-color: #2b3139;
+                    color: #0ecb81;
+                    padding: 8px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+            """)
+            
+            self.start_bot_btn.setEnabled(False)
+            self.stop_bot_btn.setEnabled(True)
+            
+            QMessageBox.information(self, "🤖 봇 시작", 
+                                    f"트레이딩봇이 시작되었습니다!\n"
+                                    f"심볼: {symbol}\n"
+                                    f"전략: {strategy}\n"
+                                    f"레버리지: {leverage}x")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "봇 시작 오류", f"트레이딩봇 시작 중 오류가 발생했습니다:\n{e}")
+    
+    def stop_trading_bot(self):
+        """트레이딩봇 중지"""
+        try:
+            if self.advanced_bot:
+                # 봇 중지
+                import asyncio
+                import threading
+                
+                def stop_bot():
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(self.advanced_bot.stop())
+                    except Exception as e:
+                        print(f"봇 중지 오류: {e}")
+                    finally:
+                        loop.close()
+                
+                stop_thread = threading.Thread(target=stop_bot, daemon=True)
+                stop_thread.start()
+                stop_thread.join(timeout=5)  # 5초 대기
+                
+            # UI 업데이트
+            self.bot_status_label.setText("중지됨 ⭕")
+            self.bot_status_label.setStyleSheet("""
+                QLabel {
+                    background-color: #2b3139;
+                    color: #f6465d;
+                    padding: 8px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+            """)
+            
+            self.start_bot_btn.setEnabled(True)
+            self.stop_bot_btn.setEnabled(False)
+            
+            QMessageBox.information(self, "🤖 봇 중지", "트레이딩봇이 중지되었습니다.")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "봇 중지 오류", f"트레이딩봇 중지 중 오류가 발생했습니다:\n{e}")
+    
+    def update_bot_performance(self):
+        """봇 성과 업데이트 (주기적으로 호출)"""
+        try:
+            if self.advanced_bot and hasattr(self.advanced_bot, 'performance_metrics'):
+                metrics = self.advanced_bot.performance_metrics
+                total_trades = metrics.get('total_trades', 0)
+                winning_trades = metrics.get('winning_trades', 0)
+                total_pnl = metrics.get('total_pnl', 0.0)
+                
+                win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+                
+                self.bot_performance_label.setText(
+                    f"거래: {total_trades}건 | 승률: {win_rate:.1f}% | 수익: {total_pnl:.2f} USDT"
+                )
+        except Exception as e:
+            print(f"봇 성과 업데이트 오류: {e}")
 
 def main():
     # Qt 플러그인 경로 자동 설정 (macOS 호환성)

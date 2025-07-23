@@ -188,6 +188,20 @@ class CrossPositionManager:
             if position['symbol'] == symbol:
                 return position
         return None
+    
+    def get_active_positions(self):
+        """활성 포지션 목록 반환"""
+        try:
+            # 현재 보유 중인 모든 포지션 반환
+            active_positions = []
+            for position in self.cross_data.get('positions', []):
+                if position.get('quantity', 0) != 0:  # 수량이 0이 아닌 포지션만
+                    active_positions.append(position)
+            
+            return active_positions
+        except Exception as e:
+            self.logger.error(f"활성 포지션 조회 오류: {e}")
+            return []
 
     def calculate_unrealized_pnl(self, position, current_price):
         """미실현 손익 계산 - 수정된 올바른 계산 방식 🚀"""
