@@ -1141,14 +1141,13 @@ def momentum_spike_scalping_long_short_half_capital(params, df, initial_cash, fe
 
 def momentum_spike_scalping_long_short_realistic(params, df, initial_cash, fee_rate, leverage):
     """
-    급등/급락 스캘핑(50% 자본) 전략에 '최소 주문 수량' 필터를 추가한 현실적인 버전
+    급등/급락 스캘핑(50% 자본, 최소 주문량) 전략에 현실적인 레버리지 수수료를 적용한 최종 버전
     """
     # 1. 파라미터 설정
     try:
         spike_pct = float(params.get('spike_pct', 3.0))
         take_profit_pct = float(params.get('take_profit_pct', 1.0))
         stop_loss_pct = float(params.get('stop_loss_pct', -1.0))
-        # ⭐ 최소 주문 수량 파라미터 추가 (BTC 기준)
         min_order_size_btc = float(params.get('min_order_size_btc', 0.001))
     except (ValueError, TypeError):
         spike_pct, take_profit_pct, stop_loss_pct = 3.0, 1.0, -1.0
@@ -1170,7 +1169,7 @@ def momentum_spike_scalping_long_short_realistic(params, df, initial_cash, fee_r
     for i in range(1, len(df)):
         current_price = df['Close'].iloc[i]
 
-        # --- 4-1. 위험 관리 (이전과 동일) ---
+        # --- 4-1. 위험 관리 (포지션 종료) ---
         if position_status != 'none':
             exit_price, is_liquidated = 0, False
             if position_status == 'long':
@@ -1181,9 +1180,20 @@ def momentum_spike_scalping_long_short_realistic(params, df, initial_cash, fee_r
                 if leverage > 1 and df['High'].iloc[i] >= liquidation_price: exit_price, liquidations, is_liquidated = liquidation_price, liquidations + 1, True
                 elif df['High'].iloc[i] >= stop_loss_price: exit_price = stop_loss_price
                 elif df['Low'].iloc[i] <= take_profit_price: exit_price = take_profit_price
+            
             if exit_price > 0:
                 pnl = _calculate_pnl(entry_price, exit_price, position_margin, leverage, position_status)
-                if not is_liquidated: cash += (position_margin + pnl) * (1 - fee_rate)
+                
+                # ⭐ --- 현실적인 레버리지 수수료 계산 로직 ---
+                position_size = position_margin * leverage
+                # 진입과 청산, 두 번의 거래에 대한 수수료를 한 번에 계산
+                fee = position_size * fee_rate * 2 
+
+                if not is_liquidated:
+                    # 남겨둔 현금(cash)에 포지션 결과(증거금 + 손익 - 수수료)를 더함
+                    cash += (position_margin + pnl) - fee
+                # 청산 시에는 증거금을 모두 잃으므로, 남겨둔 현금(cash)만 남게 됨 (아무것도 더하지 않음)
+                
                 cash = min(cash, MAX_ASSET_VALUE)
                 position_status, position_margin, trades = 'none', 0, trades + 1
 
@@ -1194,7 +1204,6 @@ def momentum_spike_scalping_long_short_realistic(params, df, initial_cash, fee_r
             elif df['pct_change'].iloc[i-1] <= fall_pct: signal = 'short'
 
             if signal != 'none' and entry_price_candidate > 0:
-                # ⭐ --- 최소 주문 수량 체크 로직 ---
                 potential_margin = cash * 0.5
                 potential_position_size_btc = (potential_margin * leverage) / entry_price_candidate
                 
@@ -1212,13 +1221,13 @@ def momentum_spike_scalping_long_short_realistic(params, df, initial_cash, fee_r
                         stop_loss_price = entry_price * (1 - stop_loss_pct / 100)
                         if leverage > 1: liquidation_price = entry_price * (1 + 1/leverage)
         
-        # --- 4-3. 현재 자산 평가 및 기록 (이전과 동일) ---
+        # --- 4-3. 현재 자산 평가 및 기록 ---
         current_asset = cash
         if position_status != 'none':
             current_asset += _calculate_asset(entry_price, current_price, position_margin, leverage, position_status, 0)
         asset_history.append(current_asset)
 
-    # 5. 최종 결과 계산 및 반환 (이전과 동일)
+    # 5. 최종 결과 계산 및 반환
     final_asset = asset_history[-1] if asset_history else initial_cash
     total_return = (final_asset / initial_cash - 1) * 100
     asset_series = pd.Series(asset_history)
